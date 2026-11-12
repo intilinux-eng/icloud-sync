@@ -1,0 +1,1130 @@
+#!/usr/bin/env python3
+"""icloud-sync — sincronizzazione bidirezionale di iCloud Drive su Linux.
+
+Motore: `rclone bisync` (backend iclouddrive). Questo programma aggiunge:
+  * reazione immediata alle modifiche locali (inotify) + polling del remoto
+  * protezioni: file di controllo, limite cancellazioni, lock, niente sync offline
+  * auto-ripristino dopo errori, promemoria per il login Apple (scade ogni 30 giorni)
+  * servizio systemd utente, notifiche desktop, comando `status`
+
+Nessuna dipendenza oltre a Python >= 3.11 e rclone >= 1.69.
+"""
+from __future__ import annotations
+
+import argparse
+import ctypes
+import errno
+import fcntl
+import fnmatch
+import getpass
+import hashlib
+import io
+import json
+import os
+import platform
+import re
+import select
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import time
+import urllib.request
+import zipfile
+from pathlib import Path
+
+try:
+    import tomllib
+except ImportError:  # pragma: no cover
+    sys.exit("icloud-sync richiede Python 3.11 o successivo.")
+
+APP = "icloud-sync"
+VERSION = "0.1.0"
+HOME = Path.home()
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / APP
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / APP
+CONFIG_FILE = CONFIG_DIR / "config.toml"
+FILTERS_FILE = CONFIG_DIR / "filters.txt"
+STATE_FILE = STATE_DIR / "state.json"
+LOG_FILE = STATE_DIR / "sync.log"
+RUN_LOG = STATE_DIR / "last-run.log"
+ERR_LOG = STATE_DIR / "last-error.log"
+LOCK_FILE = STATE_DIR / "lock"
+PID_FILE = STATE_DIR / "daemon.pid"
+BIN_DIR = HOME / ".local/bin"
+UNIT_NAME = "icloud-sync.service"
+UNIT_PATH = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "systemd/user" / UNIT_NAME
+MIN_RCLONE = (1, 69)
+CHECK_FILE = "RCLONE_TEST"
+TRUST_DAYS = 30
+AUTO_RESYNC_COOLDOWN = 6 * 3600
+
+DEFAULTS = {
+    "remote": "icloud:",
+    "local": "~/iCloudDrive",
+    "poll_interval": 300,
+    "debounce": 5,
+    "max_wait": 60,
+    "max_delete": 25,
+    "conflict_resolve": "newer",
+    "check_access": True,
+    "auto_resync": True,
+    "transfers": 4,
+    "checkers": 8,
+    "notifications": True,
+    "connectivity_host": "www.icloud.com",
+    "rclone_path": "",
+    "exclude": [
+        ".DS_Store", "._*", ".Trash-*/", ".directory", "desktop.ini", "Thumbs.db",
+        "*.tmp", "*.swp", "*.swx", "*~", ".~lock.*#", "~$*", "*.kate-swp",
+        "*.part", "*.partial", "*.crdownload", ".goutputstream-*", ".fuse_hidden*", ".nfs*",
+    ],
+    "extra_flags": [],
+}
+
+CONFIG_HELP = {
+    "remote": "Remote rclone (ed eventuale sottocartella), es. \"icloud:\" o \"icloud:Documenti\"",
+    "local": "Cartella locale da tenere sincronizzata",
+    "poll_interval": "Ogni quanti secondi controllare le modifiche fatte su iCloud",
+    "debounce": "Secondi di quiete dopo una modifica locale prima di sincronizzare",
+    "max_wait": "Attesa massima (secondi) se le modifiche locali non si fermano mai",
+    "max_delete": "Blocca la sync se andrebbe eliminato più di questo % di file su un lato",
+    "conflict_resolve": "File modificato su entrambi i lati: newer | older | larger | smaller | path1 | path2 | none\n# (il perdente non viene mai cancellato: viene rinominato in *.conflictN)",
+    "check_access": f"Richiede il file {CHECK_FILE} su entrambi i lati (protegge da elenchi vuoti/errati)",
+    "auto_resync": "Ripara da solo lo stato dopo un errore critico (non elimina mai file)",
+    "transfers": "Trasferimenti in parallelo",
+    "checkers": "Controlli in parallelo (alzare velocizza l'elenco di cartelle grandi)",
+    "notifications": "Notifiche desktop su errori, conflitti e scadenza login",
+    "connectivity_host": "Host usato per capire se c'è rete (stringa vuota = non controllare)",
+    "rclone_path": "Percorso di rclone (vuoto = cerca nel PATH e in ~/.local/bin)",
+    "exclude": "File/cartelle da ignorare (glob sul nome; \"/\" finale = cartella)",
+    "extra_flags": "Flag aggiuntivi passati a rclone bisync, es. [\"--bwlimit\", \"2M\"]",
+}
+
+AUTH_RE = re.compile(
+    r"missing pcs cookies|requestpcs|trust.?token|please reauth|\b2fa\b|two.factor|unauthori[sz]ed|authenticat"
+    r"|invalid (session|credentials)|http error 40[13]|http error 42[13]|config reconnect",
+    re.I,
+)
+ACCESS_RE = re.compile(r"access (test|check) failed|failed to find any files named|check file check failed", re.I)
+LOG_PREFIX_RE = re.compile(r"^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d\s+")
+
+
+# ---------------------------------------------------------------- utilità
+
+def say(msg: str = "") -> None:
+    print(msg, flush=True)
+
+
+def log(msg: str) -> None:
+    """Riga su stdout (journal) e nel file di log persistente."""
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
+    say(line)
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > 5_000_000:
+            LOG_FILE.replace(LOG_FILE.with_suffix(".log.1"))
+        with LOG_FILE.open("a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def load_state() -> dict:
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(st: dict) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(st, indent=1))
+    tmp.replace(STATE_FILE)
+
+
+def ago(ts: float | None) -> str:
+    if not ts:
+        return "mai"
+    d = max(0, time.time() - ts)
+    if d < 90:
+        return f"{int(d)} s fa"
+    if d < 5400:
+        return f"{int(d / 60)} min fa"
+    if d < 172800:
+        return f"{int(d / 3600)} h fa"
+    return f"{int(d / 86400)} giorni fa"
+
+
+def ask(prompt: str, default: str = "") -> str:
+    ans = input(f"{prompt} [{default}]: " if default else f"{prompt}: ").strip()
+    return ans or default
+
+
+def confirm(prompt: str, default: bool = True) -> bool:
+    ans = input(f"{prompt} [{'S/n' if default else 's/N'}]: ").strip().lower()
+    return default if not ans else ans[0] in "sy"
+
+
+def notify(cfg: dict, title: str, body: str, urgent: bool = False) -> None:
+    if not cfg.get("notifications") or not shutil.which("notify-send"):
+        return
+    try:
+        subprocess.run(
+            ["notify-send", "-a", "iCloud Drive", "-i", "folder-cloud",
+             "-u", "critical" if urgent else "normal", title, body],
+            timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+# ---------------------------------------------------------------- configurazione
+
+def load_config(required: bool = True) -> dict:
+    cfg = dict(DEFAULTS)
+    if CONFIG_FILE.exists():
+        try:
+            user = tomllib.loads(CONFIG_FILE.read_text())
+        except tomllib.TOMLDecodeError as e:
+            sys.exit(f"Errore in {CONFIG_FILE}: {e}")
+        for k, v in user.items():
+            if k not in DEFAULTS:
+                say(f"attenzione: opzione sconosciuta «{k}» in {CONFIG_FILE}")
+            elif type(v) is not type(DEFAULTS[k]):
+                sys.exit(f"Errore in {CONFIG_FILE}: «{k}» deve essere di tipo {type(DEFAULTS[k]).__name__}")
+            else:
+                cfg[k] = v
+    elif required:
+        sys.exit(f"Nessuna configurazione trovata. Esegui prima:  {APP} setup")
+    return cfg
+
+
+def write_config(cfg: dict) -> None:
+    out = [f"# Configurazione di {APP}. Dopo una modifica: {APP} restart", ""]
+    for k in DEFAULTS:
+        out += [f"# {line}" if i == 0 else line for i, line in enumerate(CONFIG_HELP[k].split("\n"))]
+        v = cfg[k]
+        if isinstance(v, bool):
+            out.append(f"{k} = {'true' if v else 'false'}")
+        elif isinstance(v, list):
+            out.append(f"{k} = [" + ", ".join(json.dumps(x, ensure_ascii=False) for x in v) + "]")
+        elif isinstance(v, str):
+            out.append(f"{k} = {json.dumps(v, ensure_ascii=False)}")
+        else:
+            out.append(f"{k} = {v}")
+        out.append("")
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text("\n".join(out))
+
+
+def exclude_matcher(patterns: list[str]):
+    pats = [p.rstrip("/") for p in patterns]
+    return lambda name: any(fnmatch.fnmatchcase(name, p) for p in pats)
+
+
+def filters_text(patterns: list[str]) -> str:
+    lines = [f"# generato da {APP} da config.toml: non modificare a mano"]
+    for p in patterns:
+        lines.append(f"- {p}**" if p.endswith("/") else f"- {p}")
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------- rclone
+
+def find_rclone(cfg: dict) -> str | None:
+    for cand in (cfg.get("rclone_path"), shutil.which("rclone"), str(BIN_DIR / "rclone")):
+        if cand and os.access(os.path.expanduser(cand), os.X_OK):
+            return os.path.expanduser(cand)
+    return None
+
+
+def rclone_version(rclone: str) -> tuple[int, ...]:
+    out = subprocess.run([rclone, "version"], capture_output=True, text=True).stdout
+    m = re.search(r"rclone v(\d+)\.(\d+)(?:\.(\d+))?", out)
+    return tuple(int(x or 0) for x in m.groups()) if m else (0,)
+
+
+def need_rclone(cfg: dict) -> str:
+    rclone = find_rclone(cfg)
+    if not rclone:
+        sys.exit(f"rclone non trovato. Installa con:  {APP} install-rclone   (oppure: sudo apt install rclone)")
+    ver = rclone_version(rclone)
+    if ver[:2] < MIN_RCLONE:
+        sys.exit(f"rclone {'.'.join(map(str, ver))} è troppo vecchio: serve >= 1.69 per iCloud Drive.\n"
+                 f"Aggiorna con:  {APP} install-rclone")
+    return rclone
+
+
+def install_rclone() -> str:
+    """Scarica il binario ufficiale in ~/.local/bin verificandone lo SHA-256."""
+    arch = {"x86_64": "amd64", "aarch64": "arm64", "armv7l": "arm-v7", "i686": "386"}.get(platform.machine())
+    if not arch:
+        sys.exit(f"Architettura {platform.machine()} non gestita: installa rclone da https://rclone.org/downloads/")
+
+    def fetch(url: str) -> bytes:
+        # downloads.rclone.org rifiuta (403) lo User-Agent predefinito di urllib
+        req = urllib.request.Request(url, headers={"User-Agent": f"{APP}/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return r.read()
+
+    ver = fetch("https://downloads.rclone.org/version.txt").decode().split()[-1]
+    name = f"rclone-{ver}-linux-{arch}.zip"
+    base = f"https://downloads.rclone.org/{ver}/"
+    say(f"Scarico {name} da downloads.rclone.org …")
+    data = fetch(base + name)
+    sums = fetch(base + "SHA256SUMS").decode()
+    expected = next((l.split()[0] for l in sums.splitlines() if l.strip().endswith(name)), None)
+    actual = hashlib.sha256(data).hexdigest()
+    if expected != actual:
+        sys.exit(f"Checksum NON valido per {name} (atteso {expected}, ottenuto {actual}): installazione annullata.")
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        member = next(n for n in z.namelist() if n.endswith("/rclone"))
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        target = BIN_DIR / "rclone"
+        tmp = target.with_suffix(".new")
+        tmp.write_bytes(z.read(member))
+        tmp.chmod(0o755)
+        tmp.replace(target)
+    say(f"✓ rclone {ver} installato in {target} (checksum verificato)")
+    return str(target)
+
+
+def rclone_conf_path(rclone: str) -> Path:
+    out = subprocess.run([rclone, "config", "file"], capture_output=True, text=True).stdout
+    return Path(out.strip().splitlines()[-1])
+
+
+def rclone_conf_set(path: Path, section: str, values: dict[str, str | None]) -> None:
+    """Imposta (o rimuove, se None) chiavi in una sezione di rclone.conf senza toccare il resto."""
+    text = path.read_text() if path.exists() else ""
+    if text.startswith("# Encrypted rclone configuration"):
+        raise RuntimeError("la configurazione di rclone è cifrata")
+    lines = text.splitlines()
+    try:
+        start = next(i for i, l in enumerate(lines) if l.strip() == f"[{section}]")
+    except StopIteration:
+        lines += ["", f"[{section}]"]
+        start = len(lines) - 1
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("[")), len(lines))
+    body = [l for l in lines[start + 1:end] if l.strip()]
+    todo = dict(values)
+    new_body = []
+    for l in body:
+        key = l.split("=", 1)[0].strip()
+        if key in todo:
+            v = todo.pop(key)
+            if v is not None:
+                new_body.append(f"{key} = {v}")
+        else:
+            new_body.append(l)
+    new_body += [f"{k} = {v}" for k, v in todo.items() if v is not None]
+    lines[start + 1:end] = new_body + [""]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".icloud-sync.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(lines).strip("\n") + "\n")
+    tmp.replace(path)
+
+
+def remote_name(remote: str) -> str | None:
+    if ":" in remote and not remote.startswith(("/", ".", "~")):
+        return remote.split(":", 1)[0]
+    return None
+
+
+def remote_join(remote: str, name: str) -> str:
+    if remote.endswith(":") or remote.endswith("/"):
+        return remote + name
+    return f"{remote}/{name}"
+
+
+# ---------------------------------------------------------------- motore di sync
+
+class Result:
+    def __init__(self, status: str, message: str = "", counts: dict | None = None):
+        self.status, self.message, self.counts = status, message, counts or {}
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+
+STATUS_TEXT = {
+    "ok": "✓ sincronizzato",
+    "offline": "… offline, riprovo appena torna la rete",
+    "busy": "… sincronizzazione in corso",
+    "stopped": "… interrotta",
+    "auth": "✗ login Apple scaduto o rifiutato",
+    "deletes": "✗ bloccato: troppe eliminazioni in una volta",
+    "access": "✗ bloccato: file di controllo mancante",
+    "resync-needed": "✗ stato da ricostruire",
+    "remote": "✗ iCloud non raggiungibile",
+    "error": "✗ errore",
+}
+
+STATUS_HINT = {
+    "auth": f"Esegui:  {APP} login",
+    "deletes": f"Se le eliminazioni sono volute:  {APP} sync --force",
+    "access": f"Controlla che {CHECK_FILE} esista su entrambi i lati, poi:  {APP} resync",
+    "resync-needed": f"Esegui:  {APP} resync",
+    "remote": f"Se persiste:  {APP} login   (dettagli: {APP} doctor)",
+    "error": f"Dettagli:  {APP} log",
+}
+
+
+class Engine:
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.rclone = need_rclone(cfg)
+        self.local = Path(os.path.expanduser(cfg["local"])).absolute()
+        self.remote = cfg["remote"]
+        self.child: subprocess.Popen | None = None
+        self.interrupted = False
+
+    # -- processi
+
+    def run(self, args: list[str], timeout: float | None = 120, **kw) -> subprocess.CompletedProcess:
+        return subprocess.run([self.rclone, *args], capture_output=True, text=True, timeout=timeout, **kw)
+
+    def interrupt(self) -> None:
+        """Arresto pulito: rclone bisync salva lo stato quando riceve SIGINT."""
+        if self.child and self.child.poll() is None:
+            self.interrupted = True
+            try:
+                self.child.send_signal(signal.SIGINT)
+            except ProcessLookupError:
+                pass
+
+    def online(self) -> bool:
+        host = self.cfg["connectivity_host"]
+        if not host:
+            return True
+        try:
+            socket.create_connection((host, 443), timeout=6).close()
+            return True
+        except OSError:
+            return False
+
+    def probe(self) -> tuple[bool, str]:
+        """Elenco veloce del primo livello: dice se il remote risponde davvero."""
+        try:
+            p = self.run(["lsf", self.remote, "--max-depth", "1"], timeout=120)
+        except subprocess.TimeoutExpired:
+            return False, "timeout"
+        return p.returncode == 0, last_error(p.stderr) or p.stderr.strip()[-300:]
+
+    # -- preparazione
+
+    def empty_dirs_supported(self, st: dict) -> bool:
+        feats = st.setdefault("features", {})
+        if self.remote not in feats:
+            p = self.run(["backend", "features", self.remote])
+            if p.returncode != 0:
+                raise RcloneFailure(p.returncode, p.stderr)
+            feats[self.remote] = bool(json.loads(p.stdout).get("Features", {}).get("CanHaveEmptyDirectories"))
+        return feats[self.remote]
+
+    def signature(self, filters: str, empty_dirs: bool) -> str:
+        blob = json.dumps([str(self.local), self.remote, filters, empty_dirs, self.cfg["check_access"]])
+        return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+    def ensure_check_files(self) -> None:
+        """Crea il file di controllo dove manca. Chiamato SOLO su richiesta esplicita o al primo avvio."""
+        lf = self.local / CHECK_FILE
+        rf = remote_join(self.remote, CHECK_FILE)
+        p = self.run(["lsf", rf])
+        on_remote = p.returncode == 0 and p.stdout.strip() != ""
+        if on_remote and not lf.exists():
+            p = self.run(["copyto", rf, str(lf)])
+        elif not on_remote:
+            if not lf.exists():
+                lf.write_text(f"File di controllo di {APP}: non eliminarlo.\n"
+                              "Serve a verificare che entrambi i lati siano davvero raggiungibili prima di sincronizzare.\n")
+            p = self.run(["copyto", str(lf), rf])
+        if p.returncode != 0 and not (on_remote and lf.exists()):
+            raise RcloneFailure(p.returncode, p.stderr)
+
+    # -- esecuzione
+
+    def bisync(self, *, resync: str | None, dry_run: bool, force: bool, interactive: bool, empty_dirs: bool) -> tuple[int, str]:
+        c = self.cfg
+        cmd = [
+            self.rclone, "bisync", str(self.local), self.remote,
+            "--resilient", "--recover", "--max-lock", "2m",
+            "--compare", "size,modtime",
+            "--conflict-resolve", c["conflict_resolve"], "--conflict-loser", "num",
+            "--max-delete", str(c["max_delete"]),
+            "--filters-file", str(FILTERS_FILE),
+            "--transfers", str(c["transfers"]), "--checkers", str(c["checkers"]),
+            "--skip-links",
+            "--log-file", str(RUN_LOG), "-v",
+        ]
+        if c["check_access"]:
+            cmd += ["--check-access", "--check-filename", CHECK_FILE]
+        if empty_dirs:
+            cmd.append("--create-empty-src-dirs")
+        if resync:
+            cmd += ["--resync", "--resync-mode", resync]
+        if dry_run:
+            cmd.append("--dry-run")
+        if force:
+            cmd.append("--force")
+        cmd += ["--progress"] if interactive else ["--stats", "0"]
+        cmd += c["extra_flags"]
+
+        RUN_LOG.write_text("")
+        # Sessione propria: Ctrl+C / SIGTERM arrivano solo a noi, che inoltriamo UN solo SIGINT.
+        self.child = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, start_new_session=True)
+        try:
+            rc = self.child.wait()
+        except KeyboardInterrupt:
+            say("\nInterruzione: attendo che rclone salvi lo stato …")
+            self.interrupt()
+            self.child.wait()
+            raise
+        finally:
+            self.child = None
+        text = RUN_LOG.read_text(errors="replace")
+        if rc != 0:
+            shutil.copyfile(RUN_LOG, ERR_LOG)
+        return rc, text
+
+    def classify(self, rc: int, text: str) -> Result:
+        counts = parse_counts(text)
+        if rc == 0:
+            return Result("ok", summarize(counts), counts)
+        low = text.lower()
+        err = last_error(text) or f"rclone è uscito con codice {rc}"
+        if AUTH_RE.search(text):
+            return Result("auth", err)
+        if "too many deletes" in low:
+            return Result("deletes", err)
+        if ACCESS_RE.search(text):
+            return Result("access", err)
+        if rc == 7 or "must run --resync" in low:
+            return Result("resync-needed", err)
+        return Result("error", err)
+
+    def attempt(self, st: dict, *, resync: str | None, dry_run: bool, force: bool, interactive: bool, manual: bool) -> Result:
+        if not self.local.is_dir():
+            if st.get("baseline"):
+                return Result("error", f"cartella locale non trovata: {self.local} (disco non montato?)")
+            self.local.mkdir(parents=True)
+        if not self.online():
+            return Result("offline", "nessuna connessione")
+
+        ftext = filters_text(self.cfg["exclude"])
+        if not FILTERS_FILE.exists() or FILTERS_FILE.read_text() != ftext:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            FILTERS_FILE.write_text(ftext)
+        try:
+            empty_dirs = self.empty_dirs_supported(st)
+            sig = self.signature(ftext, empty_dirs)
+            first = st.get("baseline") != sig
+            if first and not resync:
+                log("Prima sincronizzazione (o configurazione cambiata): allineo i due lati senza eliminare nulla")
+                resync = "newer"
+            if resync and (manual or first) and self.cfg["check_access"]:
+                self.ensure_check_files()
+        except RcloneFailure as e:
+            return self.refine(self.classify(e.rc, e.text))
+        except subprocess.TimeoutExpired:
+            return Result("remote", "timeout nel contattare il remote")
+
+        opts = dict(dry_run=dry_run, force=force, interactive=interactive, empty_dirs=empty_dirs)
+        rc, text = self.bisync(resync=resync, **opts)
+        if self.interrupted:
+            # Arresto richiesto: non è un errore, la prossima esecuzione riprende da dove serve (--recover)
+            return Result("stopped", "interrotta su richiesta")
+        res = self.classify(rc, text)
+
+        cooled = time.time() - st.get("last_auto_resync", 0) > AUTO_RESYNC_COOLDOWN
+        if res.status == "resync-needed" and not resync and not dry_run and self.cfg["auto_resync"] and cooled:
+            log(f"Stato bisync non valido ({res.message}): ricostruisco con --resync (nessun file viene eliminato)")
+            st["last_auto_resync"] = time.time()
+            resync = "newer"
+            rc, text = self.bisync(resync=resync, **opts)
+            res = self.classify(rc, text)
+
+        if res.ok and resync and not dry_run:
+            st["baseline"] = sig
+        return self.refine(res)
+
+    def refine(self, res: Result) -> Result:
+        """Un errore generico può essere il login scaduto con un testo che non riconosciamo: chiedilo al remote."""
+        if res.status == "error":
+            ok, perr = self.probe()
+            if not ok:
+                return Result("auth" if AUTH_RE.search(perr) else "remote", perr or res.message)
+        return res
+
+    def sync(self, *, resync: str | None = None, dry_run: bool = False, force: bool = False,
+             interactive: bool = False, manual: bool = False) -> Result:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with LOCK_FILE.open("w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if not manual:
+                    return Result("busy", "un'altra sincronizzazione è in corso")
+                say("Un'altra sincronizzazione è in corso: attendo che finisca …")
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            st = load_state()
+            prev = st.get("status")
+            t0 = time.time()
+            res = self.attempt(st, resync=resync, dry_run=dry_run, force=force, interactive=interactive, manual=manual)
+            if dry_run or res.status == "stopped":
+                return res
+            st.update(status=res.status, message=res.message, last_attempt=t0, last_duration=round(time.time() - t0, 1))
+            if res.ok:
+                st.update(last_success=time.time(), last_counts=res.counts)
+            save_state(st)
+
+        took = f"{time.time() - t0:.0f}s"
+        if res.ok:
+            if any(res.counts.values()) or prev != "ok":
+                log(f"OK in {took}: {res.message}")
+        elif res.status != prev or manual:
+            log(f"{STATUS_TEXT.get(res.status, res.status)} — {res.message}")
+        self.announce(prev, res)
+        return res
+
+    def announce(self, prev: str | None, res: Result) -> None:
+        if res.ok:
+            if prev not in (None, "ok", "offline", "busy"):
+                notify(self.cfg, "iCloud Drive", "Sincronizzazione ripristinata.")
+            if res.counts.get("conflicts"):
+                notify(self.cfg, "iCloud Drive: conflitto",
+                       f"{res.counts['conflicts']} file modificati su entrambi i lati. "
+                       "Entrambe le versioni sono state conservate (cerca «.conflict»).")
+        elif res.status not in ("offline", "busy") and res.status != prev:
+            notify(self.cfg, f"iCloud Drive: {STATUS_TEXT[res.status].lstrip('✗ ')}",
+                   f"{res.message}\n{STATUS_HINT.get(res.status, '')}", urgent=True)
+
+
+class RcloneFailure(Exception):
+    def __init__(self, rc: int, text: str):
+        super().__init__(text)
+        self.rc, self.text = rc, text
+
+
+def last_error(text: str) -> str:
+    for line in reversed(text.splitlines()):
+        if re.search(r"\b(ERROR|CRITICAL)\b|Failed to", line):
+            line = LOG_PREFIX_RE.sub("", line)
+            line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+            return re.sub(r"^(ERROR|CRITICAL|NOTICE)\s*:\s*", "", line).strip()[:400]
+    return ""
+
+
+def parse_counts(text: str) -> dict:
+    conflicts = len(re.findall(r"New or changed in both paths", text)) - len(re.findall(r"Files are equal! Skipping", text))
+    return {
+        "copied": len(re.findall(r": Copied \(", text)),
+        "deleted": len(re.findall(r": Deleted$", text, re.M)),
+        "moved": len(re.findall(r": (?:Moved|Renamed) \(", text)),
+        "conflicts": max(0, conflicts),
+    }
+
+
+def summarize(c: dict) -> str:
+    parts = [f"{c[k]} {label}" for k, label in
+             (("copied", "copiati"), ("deleted", "eliminati"), ("moved", "rinominati"), ("conflicts", "conflitti")) if c.get(k)]
+    return ", ".join(parts) or "nessuna modifica"
+
+
+# ---------------------------------------------------------------- inotify
+
+IN_CLOSE_WRITE, IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE, IN_DELETE = 0x8, 0x40, 0x80, 0x100, 0x200
+IN_Q_OVERFLOW, IN_IGNORED, IN_ISDIR = 0x4000, 0x8000, 0x40000000
+IN_ONLYDIR, IN_DONT_FOLLOW = 0x01000000, 0x02000000
+WATCH_MASK = IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_ONLYDIR | IN_DONT_FOLLOW
+EVENT_HDR = struct.Struct("iIII")
+
+
+class Watcher:
+    """Sorveglianza ricorsiva della cartella locale con inotify (via ctypes, nessuna dipendenza)."""
+
+    def __init__(self, root: Path, excluded):
+        self.root, self.excluded = str(root), excluded
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.fd = self.libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        if self.fd < 0:
+            raise OSError(ctypes.get_errno(), "inotify_init1 fallita")
+        self.paths: dict[int, str] = {}
+        self.limit_hit = False
+        self.add_tree(self.root)
+
+    def add(self, path: str) -> None:
+        wd = self.libc.inotify_add_watch(self.fd, os.fsencode(path), WATCH_MASK)
+        if wd >= 0:
+            self.paths[wd] = path
+        elif ctypes.get_errno() == errno.ENOSPC:
+            self.limit_hit = True
+
+    def add_tree(self, top: str) -> None:
+        self.add(top)
+        for dirpath, dirnames, _ in os.walk(top):
+            dirnames[:] = [d for d in dirnames if not self.excluded(d)]
+            for d in dirnames:
+                self.add(os.path.join(dirpath, d))
+
+    def poll(self) -> bool:
+        """Svuota la coda degli eventi; True se è cambiato qualcosa che ci interessa."""
+        changed = rescan = False
+        while True:
+            try:
+                buf = os.read(self.fd, 65536)
+            except BlockingIOError:
+                break
+            off = 0
+            while off < len(buf):
+                wd, mask, _cookie, ln = EVENT_HDR.unpack_from(buf, off)
+                off += EVENT_HDR.size
+                name = buf[off:off + ln].rstrip(b"\0").decode(errors="surrogateescape")
+                off += ln
+                if mask & IN_Q_OVERFLOW:
+                    changed = rescan = True
+                elif mask & IN_IGNORED:
+                    self.paths.pop(wd, None)
+                elif name and not self.excluded(name):
+                    changed = True
+                    parent = self.paths.get(wd)
+                    if mask & IN_ISDIR and mask & (IN_CREATE | IN_MOVED_TO) and parent:
+                        self.add_tree(os.path.join(parent, name))
+        if rescan:
+            self.add_tree(self.root)
+        return changed
+
+
+# ---------------------------------------------------------------- demone
+
+def backoff(status: str, failures: int) -> int:
+    if status == "offline":
+        return 30
+    if status == "busy":
+        return 15
+    if status in ("auth", "deletes", "access", "resync-needed"):
+        return 900  # serve l'utente: i comandi login/sync/resync ci svegliano subito
+    return min(60 * 2 ** (failures - 1), 900)
+
+
+def cmd_watch(cfg: dict, _args) -> int:
+    eng = Engine(cfg)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    PID_FILE.write_text(str(os.getpid()))
+    flags = {"stop": False, "now": False}
+    rfd, wfd = os.pipe()
+    os.set_blocking(rfd, False)
+    os.set_blocking(wfd, False)
+    signal.set_wakeup_fd(wfd)
+
+    def on_stop(*_):
+        flags["stop"] = True
+        eng.interrupt()
+
+    signal.signal(signal.SIGTERM, on_stop)
+    signal.signal(signal.SIGINT, on_stop)
+    signal.signal(signal.SIGUSR1, lambda *_: flags.__setitem__("now", True))
+
+    eng.local.mkdir(parents=True, exist_ok=True)
+    watcher = None
+    try:
+        watcher = Watcher(eng.local, exclude_matcher(cfg["exclude"]))
+        if watcher.limit_hit:
+            log("Attenzione: limite di watch inotify raggiunto; alcune cartelle sono coperte solo dal controllo periodico "
+                "(aumenta fs.inotify.max_user_watches)")
+    except OSError as e:
+        log(f"inotify non disponibile ({e}): uso solo il controllo periodico")
+    log(f"Avviato: {eng.local} ⇄ {eng.remote} — {len(watcher.paths) if watcher else 0} cartelle sorvegliate, "
+        f"controllo remoto ogni {cfg['poll_interval']}s")
+
+    INF = float("inf")
+    next_poll = not_before = 0.0
+    first_evt = last_evt = None
+    failures = 0
+    while not flags["stop"]:
+        now = time.monotonic()
+        evt_due = min(last_evt + cfg["debounce"], first_evt + cfg["max_wait"]) if first_evt is not None else INF
+        deadline = max(not_before, min(next_poll, evt_due))
+        if not flags["now"] and now < deadline:
+            fds = [rfd] + ([watcher.fd] if watcher else [])
+            select.select(fds, [], [], min(deadline - now, 3600))
+            try:
+                os.read(rfd, 4096)
+            except BlockingIOError:
+                pass
+            if watcher and watcher.poll():
+                last_evt = time.monotonic()
+                first_evt = first_evt if first_evt is not None else last_evt
+            continue
+
+        flags["now"] = False
+        res = eng.sync()
+        if flags["stop"]:
+            break
+        dirty = bool(watcher and watcher.poll())  # modifiche avvenute durante la sync
+        now = time.monotonic()
+        if res.ok:
+            failures, not_before, next_poll = 0, 0.0, now + cfg["poll_interval"]
+            first_evt = last_evt = now if dirty else None
+            login_reminder(cfg)
+        else:
+            failures += 1
+            not_before = next_poll = now + backoff(res.status, failures)
+            if dirty and first_evt is None:
+                first_evt = last_evt = now
+
+    log("Arrestato")
+    PID_FILE.unlink(missing_ok=True)
+    return 0
+
+
+def login_reminder(cfg: dict) -> None:
+    st = load_state()
+    last = st.get("last_login")
+    if not last:
+        return
+    left = TRUST_DAYS - (time.time() - last) / 86400
+    today = time.strftime("%Y-%m-%d")
+    if left <= 4 and st.get("last_reminder") != today:
+        st["last_reminder"] = today
+        save_state(st)
+        notify(cfg, "iCloud Drive: login in scadenza",
+               f"Il login Apple scade tra circa {max(0, int(left))} giorni.\nRinnovalo con:  {APP} login")
+
+
+def poke_daemon() -> bool:
+    """Chiede al demone di sincronizzare subito."""
+    try:
+        pid = int(PID_FILE.read_text())
+        if APP.encode() in Path(f"/proc/{pid}/cmdline").read_bytes():
+            os.kill(pid, signal.SIGUSR1)
+            return True
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+# ---------------------------------------------------------------- comandi
+
+def finish(res: Result) -> int:
+    say(f"{STATUS_TEXT.get(res.status, res.status)} — {res.message}")
+    if not res.ok:
+        if STATUS_HINT.get(res.status):
+            say(STATUS_HINT[res.status])
+        return 1
+    return 0
+
+
+def finish_dry_run(res: Result) -> int:
+    """Anteprima: elenca le operazioni che rclone avrebbe eseguito."""
+    if not res.ok:
+        return finish(res)
+    planned = [LOG_PREFIX_RE.sub("", l).replace("NOTICE: ", "").replace(" as --dry-run is set", "")
+               for l in RUN_LOG.read_text(errors="replace").splitlines() if "--dry-run is set" in l]
+    say("\n".join(f"  {l}" for l in planned) if planned else "Nessuna modifica da fare.")
+    say("(anteprima: non è stato modificato nulla)")
+    return 0
+
+
+def cmd_sync(cfg: dict, args) -> int:
+    res = Engine(cfg).sync(dry_run=args.dry_run, force=args.force, interactive=sys.stdout.isatty(), manual=True)
+    return finish_dry_run(res) if args.dry_run else finish(res)
+
+
+def cmd_resync(cfg: dict, args) -> int:
+    mode = {"newer": "newer", "local": "path1", "icloud": "path2"}[args.prefer]
+    say("Riallineo i due lati: i file presenti da una sola parte vengono copiati dall'altra, nulla viene eliminato.")
+    res = Engine(cfg).sync(resync=mode, dry_run=args.dry_run, interactive=sys.stdout.isatty(), manual=True)
+    return finish_dry_run(res) if args.dry_run else finish(res)
+
+
+def cmd_login(cfg: dict, args) -> int:
+    rclone = need_rclone(cfg)
+    name = remote_name(cfg["remote"])
+    if not name:
+        sys.exit(f"«{cfg['remote']}» non è un remote rclone: niente login da fare.")
+    remotes = subprocess.run([rclone, "listremotes"], capture_output=True, text=True).stdout.split()
+    exists = f"{name}:" in remotes
+    if not exists or args.new_password or args.reset:
+        conf = rclone_conf_path(rclone)
+        values: dict[str, str | None] = {}
+        if args.reset:
+            values.update(cookies=None, trust_token=None)
+        if not exists or args.new_password:
+            apple_id = getattr(args, "apple_id", None) or ask("Apple ID (email)")
+            say("Password dell'Apple ID (quella normale, non una «password per app»).")
+            say("Viene salvata solo nella configurazione locale di rclone, offuscata.")
+            pw = getpass.getpass("Password: ")
+            p = subprocess.run([rclone, "obscure", "-"], input=pw, capture_output=True, text=True)
+            if p.returncode != 0 or not p.stdout.strip():
+                sys.exit(f"rclone obscure fallito: {p.stderr.strip()}")
+            values.update(type="iclouddrive", apple_id=apple_id, password=p.stdout.strip())
+        try:
+            rclone_conf_set(conf, name, values)
+        except RuntimeError as e:
+            sys.exit(f"Non posso scrivere {conf}: {e}.\nCrea il remote a mano con `rclone config` "
+                     f"(nome «{name}», tipo «iclouddrive») e rilancia.")
+    say("\nOra Apple chiederà il codice di verifica a 2 fattori (arriva sui tuoi dispositivi Apple).")
+    say("Con la Protezione avanzata dei dati attiva: abilita prima «Accedi ai dati iCloud sul web» su iPhone.\n")
+    if subprocess.call([rclone, "config", "reconnect", f"{name}:"]) != 0:
+        say(f"\n✗ Login non riuscito. Riprova con:  {APP} login --reset   (azzera cookie e token salvati)")
+        return 1
+    p = subprocess.run([rclone, "lsf", cfg["remote"], "--max-depth", "1"], capture_output=True, text=True)
+    if p.returncode != 0:
+        say(f"\n✗ Login completato ma iCloud Drive non risponde: {last_error(p.stderr) or p.stderr.strip()[-300:]}")
+        return 1
+    st = load_state()
+    st.update(last_login=time.time(), last_reminder=None)
+    save_state(st)
+    say(f"\n✓ Login riuscito: {len(p.stdout.splitlines())} elementi nella radice di iCloud Drive. "
+        f"Valido circa {TRUST_DAYS} giorni.")
+    poke_daemon()
+    return 0
+
+
+def systemctl(*args: str, quiet: bool = False) -> subprocess.CompletedProcess:
+    return subprocess.run(["systemctl", "--user", *args], capture_output=quiet, text=True)
+
+
+def installed_script() -> Path:
+    """Copia questo file in ~/.local/bin, così il servizio non dipende da dove è stato scaricato."""
+    me = Path(__file__).resolve()
+    target = BIN_DIR / APP
+    if me != target.resolve():
+        BIN_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(me, target)
+        target.chmod(0o755)
+        say(f"✓ Installato {target}")
+    return target
+
+
+def cmd_enable(cfg: dict, _args) -> int:
+    script = installed_script()
+    UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    UNIT_PATH.write_text(f"""[Unit]
+Description=Sincronizzazione iCloud Drive ({APP})
+Documentation=https://rclone.org/bisync/
+
+[Service]
+Type=simple
+ExecStart="{sys.executable}" "{script}" watch
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=30
+# SIGTERM solo al demone, che ferma rclone in modo pulito (salvataggio dello stato)
+KillMode=mixed
+TimeoutStopSec=100
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target
+""")
+    systemctl("daemon-reload")
+    rc = systemctl("enable", "--now", UNIT_NAME).returncode
+    if rc == 0:
+        systemctl("restart", UNIT_NAME)
+        say("✓ Servizio attivo: parte da solo a ogni accesso.")
+        if str(BIN_DIR) not in os.environ.get("PATH", "").split(":"):
+            say(f"Nota: {BIN_DIR} non è nel PATH; aggiungilo o usa il percorso completo.")
+    return rc
+
+
+def cmd_disable(_cfg: dict, _args) -> int:
+    systemctl("disable", "--now", UNIT_NAME)
+    UNIT_PATH.unlink(missing_ok=True)
+    systemctl("daemon-reload")
+    say("Servizio disattivato. Configurazione e file restano dove sono.")
+    return 0
+
+
+def cmd_restart(_cfg: dict, _args) -> int:
+    return systemctl("restart", UNIT_NAME).returncode
+
+
+def service_state() -> str:
+    if not shutil.which("systemctl"):
+        return "systemd non disponibile"
+    s = systemctl("is-active", UNIT_NAME, quiet=True).stdout.strip()
+    return {"active": "attivo", "inactive": "fermo", "failed": "fallito"}.get(s, s or "non installato")
+
+
+def cmd_status(cfg: dict, args) -> int:
+    st = load_state()
+    status = st.get("status")
+    if args.json:
+        say(json.dumps({**st, "service": service_state(), "local": cfg["local"], "remote": cfg["remote"]}, indent=1))
+        return 0 if status == "ok" else 1
+    say(f"{cfg['local']}  ⇄  {cfg['remote']}")
+    line = STATUS_TEXT.get(status, "mai sincronizzato")
+    if status == "ok":
+        line += f" ({ago(st.get('last_success'))}, {summarize(st.get('last_counts', {}))})"
+    say(f"  Stato:      {line}")
+    if status and status not in ("ok", "busy", "offline"):
+        say(f"              {st.get('message', '')}")
+        if STATUS_HINT.get(status):
+            say(f"              → {STATUS_HINT[status]}")
+        say(f"  Ultima ok:  {ago(st.get('last_success'))}")
+    say(f"  Servizio:   {service_state()}")
+    if st.get("last_login"):
+        left = TRUST_DAYS - (time.time() - st["last_login"]) / 86400
+        say(f"  Login:      " + (f"valido ancora ~{int(left)} giorni" if left > 0 else f"probabilmente scaduto → {APP} login"))
+    return 0 if status == "ok" else 1
+
+
+def cmd_log(_cfg: dict, args) -> int:
+    path = ERR_LOG if args.error else LOG_FILE
+    if not path.exists():
+        say("Nessun log ancora.")
+        return 0
+    lines = path.read_text(errors="replace").splitlines()
+    say("\n".join(lines[-args.lines:]))
+    return 0
+
+
+def cmd_install_rclone(_cfg: dict, _args) -> int:
+    install_rclone()
+    return 0
+
+
+def cmd_doctor(cfg: dict, _args) -> int:
+    bad = 0
+
+    def check(ok: bool, label: str, detail: str = "") -> None:
+        nonlocal bad
+        bad += not ok
+        say(f"  {'✓' if ok else '✗'} {label}" + (f" — {detail}" if detail else ""))
+
+    rclone = find_rclone(cfg)
+    ver = rclone_version(rclone) if rclone else (0,)
+    check(bool(rclone) and ver[:2] >= MIN_RCLONE, "rclone",
+          f"{rclone} v{'.'.join(map(str, ver))}" if rclone else f"mancante → {APP} install-rclone")
+    if not rclone or ver[:2] < MIN_RCLONE:
+        return 1
+    eng = Engine(cfg)
+    name = remote_name(eng.remote)
+    if name:
+        remotes = eng.run(["listremotes"]).stdout.split()
+        check(f"{name}:" in remotes, f"remote «{name}» configurato", "" if f"{name}:" in remotes else f"→ {APP} login")
+    check(eng.online(), "rete", cfg["connectivity_host"] or "controllo disattivato")
+    t0 = time.time()
+    ok, err = eng.probe()
+    check(ok, "iCloud Drive risponde", f"{time.time() - t0:.1f}s" if ok else f"{err} → {APP} login")
+    check(eng.local.is_dir(), "cartella locale", str(eng.local))
+    if cfg["check_access"] and ok:
+        lf = (eng.local / CHECK_FILE).exists()
+        p = eng.run(["lsf", remote_join(eng.remote, CHECK_FILE)])
+        rf = p.returncode == 0 and bool(p.stdout.strip())
+        check(lf and rf, f"file di controllo {CHECK_FILE}",
+              "presente su entrambi i lati" if lf and rf else f"locale: {'sì' if lf else 'no'}, iCloud: {'sì' if rf else 'no'} → {APP} resync")
+    if eng.local.is_dir():
+        ndirs = sum(1 for _ in os.walk(eng.local))
+        try:
+            limit = int(Path("/proc/sys/fs/inotify/max_user_watches").read_text())
+        except (OSError, ValueError):
+            limit = 0
+        check(not limit or ndirs < limit * 0.8, "inotify", f"{ndirs} cartelle, limite {limit}")
+    svc = service_state()
+    check(svc == "attivo", "servizio", svc if svc == "attivo" else f"{svc} → {APP} enable")
+    st = load_state()
+    check(st.get("status") == "ok", "ultima sincronizzazione",
+          f"{STATUS_TEXT.get(st.get('status'), 'mai eseguita')} ({ago(st.get('last_attempt'))})")
+    return 1 if bad else 0
+
+
+def cmd_setup(_cfg, _args) -> int:
+    say(f"=== {APP}: configurazione guidata ===\n")
+    cfg = load_config(required=False)
+
+    rclone = find_rclone(cfg)
+    if not rclone or rclone_version(rclone)[:2] < MIN_RCLONE:
+        say("rclone (>= 1.69) non è installato: è il motore che parla con iCloud.")
+        if not confirm("Scarico il binario ufficiale da rclone.org in ~/.local/bin (con verifica del checksum)?"):
+            say(f"Installalo (es. sudo apt install rclone) e rilancia:  {APP} setup")
+            return 1
+        install_rclone()
+
+    if not CONFIG_FILE.exists():
+        name = ask("Nome del remote rclone", "icloud")
+        cfg["remote"] = f"{name}:"
+        cfg["local"] = ask("Cartella locale", DEFAULTS["local"])
+    write_config(cfg)
+    say(f"✓ Configurazione: {CONFIG_FILE}\n")
+
+    ns = argparse.Namespace(new_password=False, reset=False, apple_id=None)
+    eng = Engine(cfg)
+    ok = False
+    if remote_name(cfg["remote"]) and f"{remote_name(cfg['remote'])}:" in eng.run(["listremotes"]).stdout.split():
+        ok, _ = eng.probe()
+    if remote_name(cfg["remote"]) and not ok:
+        if cmd_login(cfg, ns) != 0:
+            return 1
+
+    say("\nPrima sincronizzazione: unisce i due lati senza eliminare nulla; a parità di nome vince il file più recente.")
+    say("Può richiedere tempo se iCloud Drive contiene molti file.\n")
+    res = eng.sync(interactive=True, manual=True)
+    if finish(res) != 0:
+        say(f"\nRisolvi il problema e rilancia:  {APP} setup")
+        return 1
+    say("")
+    if shutil.which("systemctl") and confirm("Attivo la sincronizzazione automatica in background?"):
+        cmd_enable(cfg, None)
+    say(f"\nFatto. Comandi utili:  {APP} status  ·  {APP} sync  ·  {APP} log  ·  {APP} doctor")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog=APP, description="Sincronizzazione bidirezionale di iCloud Drive su Linux (motore: rclone bisync).")
+    ap.add_argument("--version", action="version", version=f"{APP} {VERSION}")
+    sub = ap.add_subparsers(dest="cmd", metavar="comando")
+
+    def add(name, fn, help_):
+        p = sub.add_parser(name, help=help_, description=help_)
+        p.set_defaults(fn=fn)
+        return p
+
+    add("setup", cmd_setup, "configurazione guidata: rclone, login Apple, prima sync, servizio")
+    add("status", cmd_status, "mostra lo stato della sincronizzazione").add_argument("--json", action="store_true")
+    p = add("sync", cmd_sync, "sincronizza adesso")
+    p.add_argument("--dry-run", action="store_true", help="mostra cosa farebbe senza modificare nulla")
+    p.add_argument("--force", action="store_true", help="consenti anche un numero elevato di eliminazioni")
+    p = add("resync", cmd_resync, "riallinea i due lati da zero (non elimina nulla)")
+    p.add_argument("--prefer", choices=["newer", "local", "icloud"], default="newer", help="chi vince se un file differisce (default: il più recente)")
+    p.add_argument("--dry-run", action="store_true")
+    p = add("login", cmd_login, "(ri)autentica l'Apple ID: serve circa ogni 30 giorni")
+    p.add_argument("--new-password", action="store_true", help="reinserisci Apple ID e password")
+    p.add_argument("--reset", action="store_true", help="azzera cookie e token salvati prima di riprovare")
+    add("enable", cmd_enable, "installa e avvia il servizio in background (systemd utente)")
+    add("disable", cmd_disable, "ferma e rimuove il servizio")
+    add("restart", cmd_restart, "riavvia il servizio (dopo aver cambiato la configurazione)")
+    add("watch", cmd_watch, "esegue il demone in primo piano (usato dal servizio)")
+    p = add("log", cmd_log, "mostra le ultime righe del log")
+    p.add_argument("-n", "--lines", type=int, default=40)
+    p.add_argument("--error", action="store_true", help="log completo di rclone dell'ultima sync fallita")
+    add("doctor", cmd_doctor, "diagnostica completa")
+    add("install-rclone", cmd_install_rclone, "installa/aggiorna rclone in ~/.local/bin")
+
+    args = ap.parse_args()
+    if not args.cmd:
+        ap.print_help()
+        return 0
+    cfg = None if args.cmd in ("setup", "install-rclone") else load_config()
+    try:
+        rc = args.fn(cfg, args)
+    except KeyboardInterrupt:
+        say("\nInterrotto.")
+        return 130
+    if rc == 0 and args.cmd in ("sync", "resync") and not args.dry_run:
+        poke_daemon()
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())
