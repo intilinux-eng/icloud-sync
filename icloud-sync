@@ -422,7 +422,9 @@ class Engine:
         self.child: subprocess.Popen | None = None
         self.interrupted = False
         self.new_skips = 0
-        self.dir_seen: dict[str, str] = {}  # cartella remota -> ID/etag all'ultima esplorazione
+        self.dir_seen: dict[str, str] = {}  # cartella remota -> ID (con etag) all'ultima esplorazione
+        self.map_stale = True
+        self.root_items: list[dict] | None = None
 
     # -- processi
 
@@ -466,11 +468,29 @@ class Engine:
             p = self.run(["lsjson", self.remote, "--max-depth", "1", *QUICK], timeout=40)
             if p.returncode != 0:
                 return None
+            self.root_items = json.loads(p.stdout)
             items = sorted((e.get("Name"), e.get("IsDir"), e.get("Size"), e.get("ModTime"), e.get("ID"))
-                           for e in json.loads(p.stdout))
+                           for e in self.root_items)
         except (subprocess.TimeoutExpired, ValueError, OSError):
             return None
         return hashlib.sha1(json.dumps(items).encode()).hexdigest()
+
+    def refresh_dir_map(self) -> bool:
+        """Memorizza l'etag di ogni cartella remota (un elenco delle sole cartelle, ~8s a riposo).
+
+        L'ID che iCloud dà a una cartella termina con un etag che cambia quando cambia qualcosa al suo
+        interno, a qualunque profondità: confrontandolo con quello memorizzato si sa dove scendere.
+        """
+        try:
+            p = self.run(["lsjson", self.remote, "-R", "--dirs-only", "--no-mimetype", "--no-modtime"], timeout=300)
+            dirs = json.loads(p.stdout) if p.returncode == 0 else None
+        except (subprocess.TimeoutExpired, ValueError, OSError):
+            dirs = None
+        if dirs is None:
+            return False
+        self.dir_seen = {d["Path"]: d["ID"] for d in dirs if d.get("ID")}
+        self.map_stale = False
+        return True
 
     def known_remote(self) -> tuple[set[str], dict[str, int]] | None:
         """Stato di iCloud all'ultima sync, letto dagli elenchi di bisync: file noti e dimensione di ogni cartella."""
@@ -499,10 +519,12 @@ class Engine:
     def fast_pull(self) -> list[str]:
         """Corsia veloce: scarica subito i file NUOVI comparsi su iCloud, senza elencare tutto il Drive.
 
-        Scende solo nelle cartelle la cui dimensione (o etag) è cambiata rispetto all'ultima sync e scarica
-        soltanto file che non erano noti a bisync e che non esistono in locale: non sovrascrive e non
-        elimina mai nulla. Modifiche ed eliminazioni restano al giro completo che segue.
+        Parte dalla radice appena letta dal controllo leggero e scende solo nelle cartelle il cui etag è
+        cambiato. Scarica soltanto file che bisync non conosceva e che non esistono in locale: non
+        sovrascrive e non elimina mai nulla. Modifiche ed eliminazioni restano al giro completo che segue.
         """
+        if not self.dir_seen or self.root_items is None:
+            return []  # serve prima la mappa degli etag (refresh_dir_map)
         with LOCK_FILE.open("w") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -511,40 +533,49 @@ class Engine:
             known = self.known_remote()
             if not known or not self.local.is_dir():
                 return []
-            files, sizes = known
+            files, _sizes = known
             excluded = exclude_matcher(self.cfg["exclude"])
             skipped = load_state().get("skipped", {})
 
             def is_skipped(rel: str) -> bool:
                 return any(rel == k.rstrip("/") or (k.endswith("/") and f"{rel}/".startswith(k)) for k in skipped)
 
-            todo, new, budget = [("", "")], [], FAST_PULL_REQUESTS
-            while todo and budget > 0:
-                d, ident = todo.pop(0)
-                budget -= 1
-                try:
-                    p = self.run(["lsjson", remote_join(self.remote, d) if d else self.remote, *QUICK], timeout=40)
-                    items = json.loads(p.stdout) if p.returncode == 0 else None
-                except (subprocess.TimeoutExpired, ValueError, OSError):
-                    items = None
-                if items is None:
-                    return []
+            new: list[str] = []
+            todo: list[tuple[str, str]] = []
+            seen_now: dict[str, str] = {}
+
+            def scan(d: str, items: list[dict]) -> None:
                 for e in items:
                     name = e.get("Name", "")
                     rel = f"{d}/{name}" if d else name
                     if not name or excluded(name) or is_skipped(rel):
                         continue
                     if e.get("IsDir"):
-                        child = e.get("ID") or ""
-                        if child and self.dir_seen.get(rel) == child:
-                            continue  # già esaminata e non più cambiata
-                        if e.get("Size", -1) >= 0 and e["Size"] == sizes.get(rel, 0):
-                            continue  # stessa dimensione dell'ultima sync
-                        todo.append((rel, child))
+                        ident = e.get("ID") or ""
+                        if not ident or self.dir_seen.get(rel) != ident:
+                            todo.append((rel, ident))  # etag cambiato (o cartella nuova): si scende
                     elif rel not in files and not (self.local / rel).exists():
                         new.append(rel)
+
+            scan("", self.root_items)
+            budget = FAST_PULL_REQUESTS
+            while todo and budget > 0:
+                d, ident = todo.pop(0)
+                budget -= 1
+                try:
+                    p = self.run(["lsjson", remote_join(self.remote, d), *QUICK], timeout=40)
+                    items = json.loads(p.stdout) if p.returncode == 0 else None
+                except (subprocess.TimeoutExpired, ValueError, OSError):
+                    items = None
+                if items is None:
+                    return []
+                scan(d, items)
                 if ident:
-                    self.dir_seen[d] = ident
+                    seen_now[d] = ident
+            if todo:
+                self.map_stale = True  # troppe cartelle cambiate: lascia fare al giro completo, poi rifai la mappa
+                return []
+            self.dir_seen.update(seen_now)
             if not new or len(new) > FAST_PULL_FILES:
                 return []
             listfile = STATE_DIR / "fast-pull.txt"
@@ -981,6 +1012,8 @@ def cmd_watch(cfg: dict, _args) -> int:
             # Dopo una sync che ha spostato file l'impronta include anche le nostre modifiche: la si
             # considera sconosciuta, così il prossimo controllo fa un giro di conferma (vuoto) e la fissa.
             synced_fp = None if changed else fp_before
+            if probe_every and not changed and eng.map_stale and not dirty:
+                eng.refresh_dir_map()  # a riposo: subito dopo una modifica iCloud elenca molto più lentamente
             if changed:
                 idle_hits, probe_delay = 0, probe_every
             elif by_probe:
