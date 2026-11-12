@@ -51,6 +51,7 @@ STATE_FILE = STATE_DIR / "state.json"
 LOG_FILE = STATE_DIR / "sync.log"
 RUN_LOG = STATE_DIR / "last-run.log"
 ERR_LOG = STATE_DIR / "last-error.log"
+CHANGE_LOG = STATE_DIR / "last-change.log"
 LOCK_FILE = STATE_DIR / "lock"
 PID_FILE = STATE_DIR / "daemon.pid"
 BIN_DIR = HOME / ".local/bin"
@@ -64,6 +65,7 @@ AUTO_RESYNC_COOLDOWN = 6 * 3600
 DEFAULTS = {
     "remote": "icloud:",
     "local": "~/iCloudDrive",
+    "remote_check_interval": 10,
     "poll_interval": 300,
     "debounce": 5,
     "max_wait": 60,
@@ -74,6 +76,7 @@ DEFAULTS = {
     "transfers": 4,
     "checkers": 8,
     "notifications": True,
+    "notify_downloads": True,
     "connectivity_host": "www.icloud.com",
     "rclone_path": "",
     "exclude": [
@@ -87,7 +90,8 @@ DEFAULTS = {
 CONFIG_HELP = {
     "remote": "Remote rclone (ed eventuale sottocartella), es. \"icloud:\" o \"icloud:Documenti\"",
     "local": "Cartella locale da tenere sincronizzata",
-    "poll_interval": "Ogni quanti secondi controllare le modifiche fatte su iCloud",
+    "remote_check_interval": "Controllo leggero di iCloud (una sola richiesta): ogni quanti secondi chiedere se è cambiato qualcosa.\n# Se sì, parte subito la sincronizzazione. 0 = disattivato",
+    "poll_interval": "Controllo completo di sicurezza: ogni quanti secondi sincronizzare comunque (coglie anche le rinomine)",
     "debounce": "Secondi di quiete dopo una modifica locale prima di sincronizzare",
     "max_wait": "Attesa massima (secondi) se le modifiche locali non si fermano mai",
     "max_delete": "Blocca la sync se andrebbe eliminato più di questo % di file su un lato",
@@ -97,6 +101,7 @@ CONFIG_HELP = {
     "transfers": "Trasferimenti in parallelo",
     "checkers": "Controlli in parallelo (alzare velocizza l'elenco di cartelle grandi)",
     "notifications": "Notifiche desktop su errori, conflitti e scadenza login",
+    "notify_downloads": "Notifica anche quando arrivano nuovi file da iCloud",
     "connectivity_host": "Host usato per capire se c'è rete (stringa vuota = non controllare)",
     "rclone_path": "Percorso di rclone (vuoto = cerca nel PATH e in ~/.local/bin)",
     "exclude": "File/cartelle da ignorare (glob sul nome; \"/\" finale = cartella)",
@@ -109,6 +114,10 @@ AUTH_RE = re.compile(
     re.I,
 )
 ACCESS_RE = re.compile(r"access (test|check) failed|failed to find any files named|check file check failed", re.I)
+LST_RE = re.compile(r'^(\S)\s+(-?\d+)\s+\S+\s+\S+\s+\S+\s+"(.*)"$')
+QUICK = ["--no-mimetype", "--retries", "1", "--low-level-retries", "1", "--contimeout", "5s", "--timeout", "15s"]
+FAST_PULL_REQUESTS = 12   # massimo di cartelle esplorate dalla corsia veloce
+FAST_PULL_FILES = 50      # oltre questa soglia è una modifica in blocco: se ne occupa il giro completo
 LOG_PREFIX_RE = re.compile(r"^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d\s+")
 
 
@@ -413,6 +422,7 @@ class Engine:
         self.child: subprocess.Popen | None = None
         self.interrupted = False
         self.new_skips = 0
+        self.dir_seen: dict[str, str] = {}  # cartella remota -> ID/etag all'ultima esplorazione
 
     # -- processi
 
@@ -445,6 +455,110 @@ class Engine:
         except subprocess.TimeoutExpired:
             return False, "timeout"
         return p.returncode == 0, last_error(p.stderr) or p.stderr.strip()[-300:]
+
+    def fingerprint(self) -> str | None:
+        """Impronta della radice remota con una sola richiesta.
+
+        iCloud riporta per ogni cartella di primo livello dimensione ricorsiva ed etag: cambiano quando
+        un file viene aggiunto, modificato o eliminato a qualunque profondità. None = non disponibile.
+        """
+        try:
+            p = self.run(["lsjson", self.remote, "--max-depth", "1", *QUICK], timeout=40)
+            if p.returncode != 0:
+                return None
+            items = sorted((e.get("Name"), e.get("IsDir"), e.get("Size"), e.get("ModTime"), e.get("ID"))
+                           for e in json.loads(p.stdout))
+        except (subprocess.TimeoutExpired, ValueError, OSError):
+            return None
+        return hashlib.sha1(json.dumps(items).encode()).hexdigest()
+
+    def known_remote(self) -> tuple[set[str], dict[str, int]] | None:
+        """Stato di iCloud all'ultima sync, letto dagli elenchi di bisync: file noti e dimensione di ogni cartella."""
+        work = Path(os.environ.get("XDG_CACHE_HOME") or HOME / ".cache") / "rclone/bisync"
+        key = str(self.local).replace("/", "_") + ".."
+        cands = [f for f in work.glob("*.path2.lst") if key in f.name]
+        if len(cands) != 1:
+            return None
+        files: set[str] = set()
+        sizes: dict[str, int] = {}
+        for line in cands[0].read_text(errors="replace").splitlines():
+            m = LST_RE.match(line)
+            if not m or m.group(1) != "-":
+                continue
+            try:
+                name = json.loads(f'"{m.group(3)}"')
+            except ValueError:
+                name = m.group(3)
+            files.add(name)
+            parts = name.split("/")[:-1]
+            for i in range(1, len(parts) + 1):
+                d = "/".join(parts[:i])
+                sizes[d] = sizes.get(d, 0) + int(m.group(2))
+        return files, sizes
+
+    def fast_pull(self) -> list[str]:
+        """Corsia veloce: scarica subito i file NUOVI comparsi su iCloud, senza elencare tutto il Drive.
+
+        Scende solo nelle cartelle la cui dimensione (o etag) è cambiata rispetto all'ultima sync e scarica
+        soltanto file che non erano noti a bisync e che non esistono in locale: non sovrascrive e non
+        elimina mai nulla. Modifiche ed eliminazioni restano al giro completo che segue.
+        """
+        with LOCK_FILE.open("w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return []
+            known = self.known_remote()
+            if not known or not self.local.is_dir():
+                return []
+            files, sizes = known
+            excluded = exclude_matcher(self.cfg["exclude"])
+            skipped = load_state().get("skipped", {})
+
+            def is_skipped(rel: str) -> bool:
+                return any(rel == k.rstrip("/") or (k.endswith("/") and f"{rel}/".startswith(k)) for k in skipped)
+
+            todo, new, budget = [("", "")], [], FAST_PULL_REQUESTS
+            while todo and budget > 0:
+                d, ident = todo.pop(0)
+                budget -= 1
+                try:
+                    p = self.run(["lsjson", remote_join(self.remote, d) if d else self.remote, *QUICK], timeout=40)
+                    items = json.loads(p.stdout) if p.returncode == 0 else None
+                except (subprocess.TimeoutExpired, ValueError, OSError):
+                    items = None
+                if items is None:
+                    return []
+                for e in items:
+                    name = e.get("Name", "")
+                    rel = f"{d}/{name}" if d else name
+                    if not name or excluded(name) or is_skipped(rel):
+                        continue
+                    if e.get("IsDir"):
+                        child = e.get("ID") or ""
+                        if child and self.dir_seen.get(rel) == child:
+                            continue  # già esaminata e non più cambiata
+                        if e.get("Size", -1) >= 0 and e["Size"] == sizes.get(rel, 0):
+                            continue  # stessa dimensione dell'ultima sync
+                        todo.append((rel, child))
+                    elif rel not in files and not (self.local / rel).exists():
+                        new.append(rel)
+                if ident:
+                    self.dir_seen[d] = ident
+            if not new or len(new) > FAST_PULL_FILES:
+                return []
+            listfile = STATE_DIR / "fast-pull.txt"
+            listfile.write_text("\n".join(new) + "\n")
+            self.child = subprocess.Popen(
+                [self.rclone, "copy", self.remote, str(self.local), "--files-from-raw", str(listfile),
+                 "--ignore-existing", "--no-traverse", "--transfers", str(self.cfg["transfers"]), "--retries", "1",
+                 "--log-file", str(STATE_DIR / "fast-pull.log"), "--log-level", "ERROR"],
+                stdin=subprocess.DEVNULL, start_new_session=True)
+            try:
+                self.child.wait()
+            finally:
+                self.child = None
+            return [rel for rel in new if (self.local / rel).exists()]
 
     # -- preparazione
 
@@ -520,6 +634,8 @@ class Engine:
         text = RUN_LOG.read_text(errors="replace")
         if rc != 0:
             shutil.copyfile(RUN_LOG, ERR_LOG)
+        elif not dry_run and any(parse_counts(text).values()):
+            shutil.copyfile(RUN_LOG, CHANGE_LOG)
         return rc, text
 
     def classify(self, rc: int, text: str) -> Result:
@@ -800,17 +916,23 @@ def cmd_watch(cfg: dict, _args) -> int:
                 "(aumenta fs.inotify.max_user_watches)")
     except OSError as e:
         log(f"inotify non disponibile ({e}): uso solo il controllo periodico")
+    probe_every = cfg["remote_check_interval"]
     log(f"Avviato: {eng.local} ⇄ {eng.remote} — {len(watcher.paths) if watcher else 0} cartelle sorvegliate, "
-        f"controllo remoto ogni {cfg['poll_interval']}s")
+        + (f"controllo leggero di iCloud ogni {probe_every}s, " if probe_every else "")
+        + f"controllo completo ogni {cfg['poll_interval']}s")
 
     INF = float("inf")
     next_poll = not_before = 0.0
+    next_probe, probe_delay = INF, probe_every
+    synced_fp = None  # impronta remota a cui corrisponde l'ultima sync senza modifiche
+    idle_hits = 0     # sync consecutive chieste dal controllo leggero ma rivelatesi vuote
     first_evt = last_evt = None
     failures = 0
     while not flags["stop"]:
         now = time.monotonic()
         evt_due = min(last_evt + cfg["debounce"], first_evt + cfg["max_wait"]) if first_evt is not None else INF
-        deadline = max(not_before, min(next_poll, evt_due))
+        sync_due = max(not_before, min(next_poll, evt_due))
+        deadline = min(sync_due, max(not_before, next_probe)) if probe_every else sync_due
         if not flags["now"] and now < deadline:
             fds = [rfd] + ([watcher.fd] if watcher else [])
             select.select(fds, [], [], min(deadline - now, 3600))
@@ -823,6 +945,29 @@ def cmd_watch(cfg: dict, _args) -> int:
                 first_evt = first_evt if first_evt is not None else last_evt
             continue
 
+        by_probe = False
+        if not flags["now"] and now < sync_due:
+            # Solo controllo leggero: se la radice remota è identica all'ultima sync, non c'è nulla da fare.
+            fp_before = eng.fingerprint()
+            next_probe = time.monotonic() + probe_delay
+            if fp_before is None or fp_before == synced_fp:
+                if fp_before is not None:
+                    idle_hits, probe_delay = 0, probe_every
+                continue
+            by_probe = True
+            pulled = eng.fast_pull()
+            if flags["stop"]:
+                break
+            if pulled:
+                names = ", ".join(os.path.basename(f) for f in pulled[:3]) + (f" e altri {len(pulled) - 3}" if len(pulled) > 3 else "")
+                log(f"Da iCloud: {len(pulled)} nuovi file ({names})")
+                if cfg["notify_downloads"]:
+                    notify(cfg, "Nuovo da iCloud Drive", names)
+                if watcher:
+                    watcher.poll()  # gli eventi dei file appena scaricati non richiedono un altro giro
+        else:
+            fp_before = eng.fingerprint() if probe_every else None
+
         flags["now"] = False
         res = eng.sync()
         if flags["stop"]:
@@ -832,10 +977,21 @@ def cmd_watch(cfg: dict, _args) -> int:
         if res.ok:
             failures, not_before, next_poll = 0, 0.0, now + cfg["poll_interval"]
             first_evt = last_evt = now if dirty else None
+            changed = any(res.counts.values())
+            # Dopo una sync che ha spostato file l'impronta include anche le nostre modifiche: la si
+            # considera sconosciuta, così il prossimo controllo fa un giro di conferma (vuoto) e la fissa.
+            synced_fp = None if changed else fp_before
+            if changed:
+                idle_hits, probe_delay = 0, probe_every
+            elif by_probe:
+                idle_hits += 1
+                if idle_hits >= 3:  # impronta instabile: dirada i controlli invece di sincronizzare a vuoto
+                    probe_delay = min(probe_delay * 2, cfg["poll_interval"])
+            next_probe = now + probe_delay if probe_every else INF
             login_reminder(cfg)
         else:
             failures += 1
-            not_before = next_poll = now + backoff(res.status, failures)
+            not_before = next_poll = next_probe = now + backoff(res.status, failures)
             if dirty and first_evt is None:
                 first_evt = last_evt = now
 
