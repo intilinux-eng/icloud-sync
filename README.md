@@ -18,6 +18,7 @@ Usare `rclone bisync` a mano però significa scrivere da sé flag, filtri, timer
 | Un elenco remoto vuoto o errato cancellerebbe tutto | file di controllo su entrambi i lati + blocco oltre il 25% di eliminazioni |
 | Stesso file modificato su due dispositivi | vince il più recente, l'altro viene conservato come `nome.conflict1.ext` |
 | Stato di bisync corrotto dopo un crash | `--resilient --recover` e ricostruzione automatica (che non elimina mai nulla) |
+| File che rclone non riesce a scaricare (cartelle condivise, documenti iWork) | esclusi automaticamente e segnalati, invece di far fallire ogni sync (`icloud-sync skipped`) |
 | Il login Apple scade ogni 30 giorni | promemoria 4 giorni prima, notifica alla scadenza, `icloud-sync login` |
 | PC sospeso, rete assente | nessun tentativo offline, ripresa automatica |
 
@@ -44,6 +45,7 @@ icloud-sync sync            sincronizza subito (--dry-run per l'anteprima)
 icloud-sync login           rinnova il login Apple (circa ogni 30 giorni)
 icloud-sync log             ultime operazioni (--error: log rclone dell'ultimo errore)
 icloud-sync doctor          diagnostica completa
+icloud-sync skipped         elementi che iCloud non lascia scaricare (--retry per riprovarli)
 icloud-sync resync          riallinea da zero senza eliminare nulla
 icloud-sync enable|disable|restart   gestione del servizio
 ```
@@ -60,6 +62,7 @@ Configurazione in `~/.config/icloud-sync/config.toml` (commentata): cartella, in
 ## Limiti noti
 
 - Il backend iCloud di rclone è classificato **sperimentale** e usa l'API web non ufficiale di Apple: un cambiamento lato Apple può romperlo finché rclone non si aggiorna (`icloud-sync install-rclone` aggiorna il binario).
+- **Cartelle condivise** (create da altri o condivise con altri) e **documenti iWork** (Keynote, Pages, Numbers): rclone oggi non riesce a scaricarli (`RootURL not set`, `sizes differ`). Vengono esclusi dalla sincronizzazione e restano solo su iCloud; l'elenco è in `icloud-sync skipped`.
 - iCloud non fornisce checksum: il confronto è su dimensione + data di modifica.
 - Ogni controllo elenca l'intero Drive: con decine di migliaia di file un ciclo dura minuti. Sincronizzare una sottocartella (`remote = "icloud:Documenti"`) lo rende molto più rapido.
 - Le modifiche remote arrivano con il ritardo del polling (default 5 minuti).

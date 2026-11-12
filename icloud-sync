@@ -226,11 +226,38 @@ def exclude_matcher(patterns: list[str]):
     return lambda name: any(fnmatch.fnmatchcase(name, p) for p in pats)
 
 
-def filters_text(patterns: list[str]) -> str:
+def filters_text(patterns: list[str], skipped: dict[str, str] | None = None) -> str:
     lines = [f"# generato da {APP} da config.toml: non modificare a mano"]
     for p in patterns:
         lines.append(f"- {p}**" if p.endswith("/") else f"- {p}")
+    if skipped:
+        lines.append(f"# esclusi automaticamente perché iCloud/rclone non li fa scaricare ({APP} skipped)")
+        for path in sorted(skipped):
+            rule = "/" + re.sub(r"([*?\[\]{}\\])", r"\\\1", path)
+            lines.append(f"- {rule}**" if path.endswith("/") else f"- {rule}")
     return "\n".join(lines) + "\n"
+
+
+# Errori permanenti per singolo file: riprovare non serve, bloccherebbero ogni sincronizzazione.
+UNSYNCABLE = [
+    # cartelle condivise: rclone le elenca ma non ottiene l'URL di download -> si esclude la cartella
+    (re.compile(r"ERROR : (.+?): Failed to copy: failed to open source object: RootURL not set"), True,
+     "cartella condivisa: rclone non riesce a scaricarla"),
+    # documenti iWork (Keynote/Pages/Numbers): iCloud dichiara una dimensione diversa dal file servito
+    (re.compile(r"ERROR : (.+?)\.[0-9a-f]{8}\.partial: corrupted on transfer: sizes differ"), False,
+     "dimensione incoerente su iCloud (tipico dei documenti iWork)"),
+]
+
+
+def find_unsyncable(text: str) -> dict[str, str]:
+    found = {}
+    for rx, whole_dir, why in UNSYNCABLE:
+        for m in rx.finditer(text):
+            path = m.group(1)
+            if whole_dir and "/" in path:
+                path = path.rsplit("/", 1)[0] + "/"
+            found[path] = why
+    return found
 
 
 # ---------------------------------------------------------------- rclone
@@ -385,6 +412,7 @@ class Engine:
         self.remote = cfg["remote"]
         self.child: subprocess.Popen | None = None
         self.interrupted = False
+        self.new_skips = 0
 
     # -- processi
 
@@ -518,7 +546,31 @@ class Engine:
         if not self.online():
             return Result("offline", "nessuna connessione")
 
-        ftext = filters_text(self.cfg["exclude"])
+        ver = ".".join(map(str, rclone_version(self.rclone)))
+        if st.get("rclone_version") != ver:
+            if st.get("skipped") and st.get("rclone_version"):
+                log(f"rclone aggiornato a {ver}: riprovo i {len(st['skipped'])} elementi esclusi in precedenza")
+                st["skipped"] = {}
+            st["rclone_version"] = ver
+
+        opts = dict(dry_run=dry_run, force=force, interactive=interactive, manual=manual)
+        for _ in range(3):
+            res, text = self.run_once(st, resync=resync, **opts)
+            if res.status not in ("error", "resync-needed") or dry_run:
+                break
+            new = {p: why for p, why in find_unsyncable(text).items() if p not in st.get("skipped", {})}
+            if not new:
+                break
+            st.setdefault("skipped", {}).update(new)
+            self.new_skips += len(new)
+            for path, why in sorted(new.items()):
+                log(f"Escluso dalla sincronizzazione: {path} — {why}")
+            # le esclusioni cambiano i filtri: il giro successivo riallinea da solo
+        return self.refine(res)
+
+    def run_once(self, st: dict, *, resync: str | None, dry_run: bool, force: bool, interactive: bool,
+                 manual: bool) -> tuple[Result, str]:
+        ftext = filters_text(self.cfg["exclude"], st.get("skipped"))
         if not FILTERS_FILE.exists() or FILTERS_FILE.read_text() != ftext:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             FILTERS_FILE.write_text(ftext)
@@ -532,19 +584,21 @@ class Engine:
             if resync and (manual or first) and self.cfg["check_access"]:
                 self.ensure_check_files()
         except RcloneFailure as e:
-            return self.refine(self.classify(e.rc, e.text))
+            return self.classify(e.rc, e.text), e.text
         except subprocess.TimeoutExpired:
-            return Result("remote", "timeout nel contattare il remote")
+            return Result("remote", "timeout nel contattare il remote"), ""
 
         opts = dict(dry_run=dry_run, force=force, interactive=interactive, empty_dirs=empty_dirs)
         rc, text = self.bisync(resync=resync, **opts)
         if self.interrupted:
             # Arresto richiesto: non è un errore, la prossima esecuzione riprende da dove serve (--recover)
-            return Result("stopped", "interrotta su richiesta")
+            return Result("stopped", "interrotta su richiesta"), text
         res = self.classify(rc, text)
 
         cooled = time.time() - st.get("last_auto_resync", 0) > AUTO_RESYNC_COOLDOWN
-        if res.status == "resync-needed" and not resync and not dry_run and self.cfg["auto_resync"] and cooled:
+        unsyncable = bool(find_unsyncable(text))
+        if (res.status == "resync-needed" and not resync and not dry_run and not unsyncable
+                and self.cfg["auto_resync"] and cooled):
             log(f"Stato bisync non valido ({res.message}): ricostruisco con --resync (nessun file viene eliminato)")
             st["last_auto_resync"] = time.time()
             resync = "newer"
@@ -553,7 +607,7 @@ class Engine:
 
         if res.ok and resync and not dry_run:
             st["baseline"] = sig
-        return self.refine(res)
+        return res, text
 
     def refine(self, res: Result) -> Result:
         """Un errore generico può essere il login scaduto con un testo che non riconosciamo: chiedilo al remote."""
@@ -595,6 +649,11 @@ class Engine:
         return res
 
     def announce(self, prev: str | None, res: Result) -> None:
+        if self.new_skips:
+            notify(self.cfg, "iCloud Drive: elementi esclusi",
+                   f"{self.new_skips} elementi non scaricabili da iCloud sono stati esclusi dalla sincronizzazione.\n"
+                   f"Elenco:  {APP} skipped")
+            self.new_skips = 0
         if res.ok:
             if prev not in (None, "ok", "offline", "busy"):
                 notify(self.cfg, "iCloud Drive", "Sincronizzazione ripristinata.")
@@ -972,11 +1031,32 @@ def cmd_status(cfg: dict, args) -> int:
         if STATUS_HINT.get(status):
             say(f"              → {STATUS_HINT[status]}")
         say(f"  Ultima ok:  {ago(st.get('last_success'))}")
+    if st.get("skipped"):
+        say(f"  Esclusi:    {len(st['skipped'])} elementi non scaricabili da iCloud → {APP} skipped")
     say(f"  Servizio:   {service_state()}")
     if st.get("last_login"):
         left = TRUST_DAYS - (time.time() - st["last_login"]) / 86400
         say(f"  Login:      " + (f"valido ancora ~{int(left)} giorni" if left > 0 else f"probabilmente scaduto → {APP} login"))
     return 0 if status == "ok" else 1
+
+
+def cmd_skipped(_cfg: dict, args) -> int:
+    st = load_state()
+    skipped = st.get("skipped", {})
+    if not skipped:
+        say("Nessun elemento escluso: tutto ciò che è in iCloud Drive viene sincronizzato.")
+        return 0
+    if args.retry:
+        st["skipped"] = {}
+        save_state(st)
+        say(f"{len(skipped)} esclusioni rimosse: verranno riprovate alla prossima sincronizzazione.")
+        poke_daemon()
+        return 0
+    say("Elementi che rclone non riesce a scaricare da iCloud e che quindi NON vengono sincronizzati:")
+    for path, why in sorted(skipped.items()):
+        say(f"  {path}\n      {why}")
+    say(f"\nPer riprovarli (es. dopo un aggiornamento di rclone):  {APP} skipped --retry")
+    return 0
 
 
 def cmd_log(_cfg: dict, args) -> int:
@@ -1108,6 +1188,8 @@ def main() -> int:
     p = add("log", cmd_log, "mostra le ultime righe del log")
     p.add_argument("-n", "--lines", type=int, default=40)
     p.add_argument("--error", action="store_true", help="log completo di rclone dell'ultima sync fallita")
+    p = add("skipped", cmd_skipped, "elenca gli elementi che iCloud non lascia scaricare")
+    p.add_argument("--retry", action="store_true", help="rimuovi le esclusioni e riprova")
     add("doctor", cmd_doctor, "diagnostica completa")
     add("install-rclone", cmd_install_rclone, "installa/aggiorna rclone in ~/.local/bin")
 
