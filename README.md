@@ -1,117 +1,162 @@
-# icloud-sync
+<p align="center">
+  <img src="data/icloud-sync.svg" width="104" alt="icloud-sync logo">
+</p>
 
-[![CI](https://github.com/intilinux-eng/icloud-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/intilinux-eng/icloud-sync/actions/workflows/ci.yml)
+<h1 align="center">icloud-sync</h1>
 
-Sincronizzazione **bidirezionale e automatica** di iCloud Drive su Linux.
-Una cartella locale (`~/iCloudDrive`) resta allineata con iCloud Drive: quello che cambi sul PC sale in pochi secondi, un file aggiunto da iPhone o Mac compare sul PC in genere entro mezzo minuto.
+<p align="center">
+  <b>iCloud Drive on Linux, as a normal folder that stays in sync by itself.</b><br>
+  Two-way, automatic, with a tray icon and safety nets against data loss.
+</p>
 
-> Progetto indipendente, non affiliato ad Apple. iCloud è un marchio di Apple Inc.
-> Software fornito **senza alcuna garanzia** (licenza MIT): tieni sempre un backup dei dati importanti.
+<p align="center">
+  <a href="https://github.com/intilinux-eng/icloud-sync/actions/workflows/ci.yml"><img src="https://github.com/intilinux-eng/icloud-sync/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/intilinux-eng/icloud-sync/releases/latest"><img src="https://img.shields.io/github/v/release/intilinux-eng/icloud-sync" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/intilinux-eng/icloud-sync" alt="MIT license"></a>
+</p>
 
-## Perché esiste
+<p align="center">
+  <img src="docs/tray-states.png" width="600" alt="Tray icon states: synced, syncing, needs you, offline, paused">
+</p>
 
-Apple non offre un client Linux e iCloud Drive non espone un filesystem né SSH: strumenti come `rsync` o `unison` non possono parlarci direttamente. L'unico motore maturo è [rclone](https://rclone.org/iclouddrive/), che dalla v1.69 ha un backend iCloud Drive nativo, e [`rclone bisync`](https://rclone.org/bisync/) per la sincronizzazione a due vie.
+<p align="center"><a href="README.it.md">🇮🇹 Leggi in italiano</a></p>
 
-Usare `rclone bisync` a mano però significa scrivere da sé flag, filtri, timer, gestione errori e rinnovo del login. `icloud-sync` è lo strato che manca:
+---
 
-| Problema | Cosa fa icloud-sync |
-|---|---|
-| iCloud non notifica le modifiche a client esterni | inotify sul lato locale (reazione in ~5 s); sul lato iCloud un controllo leggero da una sola richiesta ogni 10 s, e sincronizzazione solo quando qualcosa è cambiato |
-| Dopo ogni modifica iCloud elenca il Drive 5 volte più lentamente | "corsia veloce": i file nuovi vengono scaricati subito scendendo solo nelle cartelle il cui etag è cambiato |
-| Un elenco remoto vuoto o errato cancellerebbe tutto | file di controllo su entrambi i lati, blocco delle eliminazioni di massa, nessuna propagazione se un lato risulta vuoto |
-| Stesso file modificato su due dispositivi | vince il più recente, l'altro viene conservato come `nome.conflict1.ext` |
-| Stato di bisync corrotto dopo un crash | `--resilient --recover` e ricostruzione automatica (che non elimina mai nulla) |
-| File che rclone non riesce a scaricare (cartelle condivise, documenti iWork) | esclusi automaticamente e segnalati, invece di far fallire ogni sync (`icloud-sync skipped`) |
-| Il login Apple scade ogni 30 giorni | promemoria 4 giorni prima, notifica alla scadenza, `icloud-sync login` |
-| PC sospeso, rete assente | nessun tentativo offline, ripresa automatica |
+Apple ships no iCloud client for Linux. `icloud-sync` gives you a folder, `~/iCloudDrive`, that behaves the way you expect: save a file on the PC and it shows up on your iPhone; add one from the phone and it lands on the PC, usually within half a minute.
 
-## Installazione
+It does not reimplement Apple's private API. It drives [rclone](https://rclone.org/iclouddrive/), which maintains the hard part (Apple sign-in, two-factor, Advanced Data Protection), and adds everything a daily-use sync client needs on top.
 
-### Pacchetto Debian / Ubuntu
+## Quick start
 
-Scarica il file `.deb` dall'ultima [release](https://github.com/intilinux-eng/icloud-sync/releases) e installalo:
+On Debian, Ubuntu and derivatives, download the `.deb` from the [latest release](https://github.com/intilinux-eng/icloud-sync/releases/latest), then:
 
 ```bash
 sudo apt install ./icloud-sync_*_all.deb
-```
-
-Poi, come utente normale:
-
-```bash
 icloud-sync setup
 ```
 
-### Senza pacchetto
-
-Basta il singolo file `icloud-sync` (Python ≥ 3.11, nessun modulo da installare):
+On any other distribution the whole program is one file with no Python dependencies:
 
 ```bash
 python3 icloud-sync setup
 ```
 
-### Cosa fa `setup`
+`setup` walks you through everything: it installs rclone if yours is missing or too old, signs in to your Apple ID (you type the password and the two-factor code yourself; the password is kept only in rclone's local configuration), runs the first sync, and turns on the background service and the tray icon.
 
-La procedura guidata installa rclone se manca o è troppo vecchio (binario ufficiale, checksum verificato, in `~/.local/bin`), chiede Apple ID, password e codice a due fattori, esegue la prima sincronizzazione e attiva servizio in background e icona nel vassoio.
+> With **Advanced Data Protection** enabled, first switch on *Access iCloud Data on the Web* on your iPhone (Settings → your name → iCloud).
 
-Note sul login:
+## What you get
 
-- serve la password normale dell'Apple ID (Apple non accetta qui le "password per app"); viene salvata offuscata nella configurazione locale di rclone;
-- con la **Protezione avanzata dei dati** attiva, abilita prima *Accedi ai dati iCloud sul web* su iPhone (Impostazioni → account → iCloud).
+**Sync that keeps up**
 
-## Icona nel vassoio
+- Local changes are picked up instantly through inotify and uploaded after a 5-second quiet period.
+- iCloud is checked every 10 seconds with a single lightweight request; a full sync runs only when something actually changed.
+- New files from your phone take a fast lane: only the folders that changed are visited, and the file is downloaded right away.
 
-`icloud-sync enable` avvia anche un'icona nel vassoio di sistema (serve `python3-pyqt6`). Il bollino indica lo stato: verde sincronizzato, blu sincronizzazione in corso, rosso serve un tuo intervento, grigio offline o servizio fermo.
+**Safety nets**
 
-- **Clic sull'icona** o *Apri cartella iCloud Drive*: apre la cartella nel gestore file.
-- **Sincronizza ora**: avvia subito un giro completo.
+- A check file on both sides: if iCloud ever answers with a wrong or partial listing, nothing is touched.
+- Mass deletions are stopped and reported instead of propagated; a side that looks empty is never mirrored.
+- When the same file changes on two devices, the newer one wins and the other is kept as `name.conflict1.ext`.
+- After a crash or power loss the sync state is rebuilt automatically, and rebuilding never deletes anything.
 
-## Uso da terminale
+**A desktop citizen**
+
+- Tray icon with the state at a glance, *Open folder* and *Sync now*.
+- Notifications when a file arrives, when a conflict was kept, or when you need to act.
+- A reminder four days before the Apple sign-in expires (Apple requires a new one about every 30 days).
+- systemd user service, man page, menu entry, Debian package.
+
+## How fast is it
+
+Measured on a real iCloud Drive with about 1,200 files and 5 GB (November 2026, rclone 1.76):
+
+| What happens | Time until the other side has it |
+|---|---|
+| You save a file on the PC | about 30 seconds |
+| You add a file from iPhone or Mac | 20–30 seconds |
+| You edit or delete a file on iCloud | 40–70 seconds |
+| You rename a file on iCloud | up to 5 minutes |
+| Nothing changed | one 0.5-second request every 10 seconds |
+
+There is no push channel from iCloud that third-party clients can use, so this is not instant. Most of the remaining delay is on Apple's side: right after any change, iCloud answers listings about five times slower for a while.
+
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph PC["Your Linux PC"]
+        F["~/iCloudDrive"]
+        D["icloud-sync daemon<br/>systemd user service"]
+        T["Tray icon"]
+    end
+    R["rclone<br/>bisync + iclouddrive backend"]
+    C[("iCloud Drive")]
+    F -- "inotify: a file changed" --> D
+    D -- "every 10 s: did any folder etag change?" --> R
+    D -- "only if so: two-way sync" --> R
+    R <--> C
+    D -- "state" --> T
+```
+
+- **Engine.** `rclone bisync` does the two-way reconciliation, with `--resilient --recover --check-access --max-delete`.
+- **Local side.** A recursive inotify watcher groups bursts of changes and starts a sync.
+- **iCloud side.** iCloud gives every folder an etag that changes whenever anything inside it changes, at any depth. Reading the root is one request and tells whether the whole Drive is unchanged. This is what makes a 10-second check affordable.
+- **Fast lane.** When the root changes, the daemon follows the changed etags down, one request per level, and downloads files that are new. It never overwrites or deletes; edits and deletions are left to the full sync that follows.
+- **Failures.** Temporary errors are retried with growing delays. Errors that need you (sign-in expired, mass deletion) raise a notification that names the command to run.
+
+## Limitations
+
+- rclone's iCloud backend is marked **experimental** and uses Apple's unofficial web API. If Apple changes it, sync pauses until rclone catches up (`icloud-sync install-rclone` updates the binary). Your local files stay as they are in the meantime.
+- **Shared folders and iWork documents** (Keynote, Pages, Numbers) cannot be downloaded through rclone today. They are excluded automatically, stay on iCloud only, and are listed by `icloud-sync skipped`.
+- iCloud provides no checksums: files are compared by size and modification time.
+- It is not an on-demand filesystem: every synced file takes disk space.
+- A file named `RCLONE_TEST` appears in the Drive root. It is the check file; leave it there.
+- The program's messages are currently in **Italian**; English is on the [roadmap](ROADMAP.md).
+
+## Commands
 
 ```text
-icloud-sync status          stato, ultima sync, giorni rimasti al login
-icloud-sync sync            sincronizza subito (--dry-run per l'anteprima)
-icloud-sync login           rinnova il login Apple (circa ogni 30 giorni)
-icloud-sync log             ultime operazioni (--error: log rclone dell'ultimo errore)
-icloud-sync doctor          diagnostica completa
-icloud-sync skipped         elementi che iCloud non lascia scaricare (--retry per riprovarli)
-icloud-sync resync          riallinea da zero senza eliminare nulla
-icloud-sync enable|disable|restart   servizio in background e icona
-icloud-sync tray            solo l'icona nel vassoio
+icloud-sync setup            guided configuration
+icloud-sync status           state, last sync, days left on the Apple sign-in
+icloud-sync sync             sync now (--dry-run to preview)
+icloud-sync login            renew the Apple sign-in
+icloud-sync skipped          items iCloud will not let rclone download
+icloud-sync log              recent activity
+icloud-sync doctor           full diagnostic
+icloud-sync enable|disable   background service and tray icon
 ```
 
-Configurazione in `~/.config/icloud-sync/config.toml` (commentata): cartella, intervalli, esclusioni, limite eliminazioni, flag extra per rclone. Dopo una modifica: `icloud-sync restart`.
+Settings live in `~/.config/icloud-sync/config.toml`, with a comment on every option.
 
-## Come funziona
+## Alternatives
 
-- **Motore**: `rclone bisync LOCALE icloud:` con `--resilient --recover --max-lock 2m --check-access --max-delete 25 --conflict-resolve newer`.
-- **Lato locale**: un demone (servizio systemd utente) sorveglia la cartella con inotify, raggruppa le modifiche e lancia bisync.
-- **Lato iCloud**: la radice del Drive riporta per ogni cartella un etag che cambia quando cambia qualcosa al suo interno, a qualunque profondità. Il demone la legge ogni `remote_check_interval` secondi (una richiesta, ~0,5 s) e sincronizza solo se è cambiata. Un giro completo di sicurezza parte comunque ogni `poll_interval` secondi.
-- **Corsia veloce**: per i file nuovi il demone segue gli etag cambiati, una richiesta per livello, e scarica subito ciò che bisync non conosceva. Non sovrascrive e non elimina: modifiche ed eliminazioni restano a bisync.
-- **Errori**: quelli temporanei vengono riprovati con attesa crescente (1 → 15 min); quelli che richiedono te (login, eliminazioni di massa) producono una notifica con il comando da eseguire.
-- **Arresto**: il demone ferma rclone con un singolo SIGINT, così lo stato viene salvato correttamente.
+icloud-sync is not the only way to reach iCloud Drive from Linux, and another project may suit you better. As described in their own READMEs in November 2026:
 
-## Limiti noti
+| Project | Approach | Talks to iCloud through | Interface |
+|---|---|---|---|
+| [icloud-linux](https://github.com/IsmaeelAkram/icloud-linux) | FUSE mount with a local cache | pyicloud | command line |
+| [icloud-drive-for-linux](https://github.com/taylorhayis/icloud-drive-for-linux) | selective folder sync | its own Rust client | GTK window and panel icon, Flatpak |
+| [icloud-synk](https://github.com/kolesnikav/icloud-synk) | two-way sync, plus Photos download | its own Go client | command line |
+| [OmaiCloud](https://github.com/matheusrrocha/omaicloud) | two-way sync on a timer | rclone bisync | Omarchy bar widget |
 
-- Il backend iCloud di rclone è classificato **sperimentale** e usa l'API web non ufficiale di Apple: un cambiamento lato Apple può romperlo finché rclone non si aggiorna (`icloud-sync install-rclone` aggiorna il binario).
-- **Cartelle condivise** e **documenti iWork** (Keynote, Pages, Numbers): rclone oggi non riesce a scaricarli (`RootURL not set`, `sizes differ`). Vengono esclusi e restano solo su iCloud; l'elenco è in `icloud-sync skipped`.
-- **Tempi dal lato iCloud**: un file nuovo arriva in genere in 20–30 secondi; eliminazioni e modifiche richiedono un giro completo (40–70 secondi); le rinomine non cambiano gli etag e vengono colte dal giro di sicurezza (fino a 5 minuti).
-- iCloud non fornisce checksum: il confronto è su dimensione + data di modifica.
-- Non è un filesystem "on demand": tutti i file della cartella sincronizzata occupano spazio su disco.
-- Nella radice compare un file `RCLONE_TEST`: è il file di controllo, non eliminarlo.
-- I messaggi del programma sono per ora solo in italiano.
+Choose icloud-sync if you want a full local copy that syncs both ways, a `.deb` you can install, a tray icon on a standard desktop, and an engine (rclone) that a large community keeps working when Apple changes things. Choose a FUSE mount if you would rather not keep every file on disk.
 
-## Sviluppo
+## Contributing
 
 ```bash
-make test    # test unitari + integrazione (serve rclone: ./icloud-sync install-rclone)
-make lint    # controlli statici (serve pyflakes)
-make deb     # costruisce dist/icloud-sync_<versione>_all.deb
+make test    # unit and integration tests (needs rclone: ./icloud-sync install-rclone)
+make lint    # static checks (needs pyflakes)
+make deb     # builds dist/icloud-sync_<version>_all.deb
 ```
 
-I test di integrazione usano il programma vero e un rclone vero tra due cartelle locali. La pipeline [CI](.github/workflows/ci.yml) li esegue su Python 3.11–3.14, costruisce il pacchetto, lo passa a lintian e lo installa. Per pubblicare una versione: aggiorna `VERSION` nel programma e [CHANGELOG.md](CHANGELOG.md), poi crea il tag `vX.Y.Z`; la pipeline [Release](.github/workflows/release.yml) allega il `.deb` alla release.
+The integration tests run the real program against a real rclone between two local folders. [CI](.github/workflows/ci.yml) runs them on Python 3.11 to 3.14, builds the package, checks it with lintian and installs it. Pushing a `vX.Y.Z` tag publishes a [release](.github/workflows/release.yml) with the `.deb` attached.
 
-Sviluppi previsti: [ROADMAP.md](ROADMAP.md).
+What is planned next: [ROADMAP.md](ROADMAP.md). What changed: [CHANGELOG.md](CHANGELOG.md).
 
-## Licenza
+## License
 
-MIT — vedi [LICENSE](LICENSE).
+[MIT](LICENSE). Provided without any warranty: keep a backup of anything you cannot afford to lose.
+
+Independent project, not affiliated with Apple Inc. iCloud is a trademark of Apple Inc.
