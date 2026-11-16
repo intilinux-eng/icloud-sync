@@ -4,6 +4,8 @@ Le versioni seguono [Semantic Versioning](https://semver.org/lang/it/). Finché 
 
 ## Non ancora rilasciato
 
+- Se il file di controllo `RCLONE_TEST` viene eliminato per sbaglio dalla cartella locale, viene ripristinato da iCloud invece di bloccare la sincronizzazione (solo se la cartella contiene ancora almeno metà dei file noti).
+- Un errore passeggero (per esempio una cartella eliminata mentre la sincronizzazione la stava leggendo) non genera più una notifica: viene riprovato in silenzio e segnalato solo se si ripete.
 - README in inglese come pagina di presentazione, con nota sull'uso quotidiano e sintesi del piano di sviluppo; la versione italiana è in `README.it.md`.
 - Licenze: intestazioni SPDX nei sorgenti, elenco del software di terzi, avviso di assenza di garanzia nel README, nella guida in linea, nella procedura `setup` e nella pagina man.
 

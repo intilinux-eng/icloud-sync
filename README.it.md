@@ -109,7 +109,7 @@ Configurazione in `~/.config/icloud-sync/config.toml` (commentata): cartella, in
 - **Tempi dal lato iCloud**: un file nuovo arriva in genere in 20–30 secondi; eliminazioni e modifiche richiedono un giro completo (40–70 secondi); le rinomine non cambiano gli etag e vengono colte dal giro di sicurezza (fino a 5 minuti).
 - iCloud non fornisce checksum: il confronto è su dimensione + data di modifica.
 - Non è un filesystem "on demand": tutti i file della cartella sincronizzata occupano spazio su disco.
-- Nella radice compare un file `RCLONE_TEST`: è il file di controllo, non eliminarlo.
+- Nella radice compare un file `RCLONE_TEST`: è il file di controllo, non eliminarlo. Se lo cancelli per sbaglio dal PC viene rimesso.
 - I messaggi del programma sono per ora solo in italiano.
 
 ## Piano di sviluppo

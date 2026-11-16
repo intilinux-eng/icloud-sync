@@ -122,7 +122,7 @@ flowchart TB
 - **Shared folders and iWork documents** (Keynote, Pages, Numbers) cannot be downloaded through rclone today. They are excluded automatically, stay on iCloud only, and are listed by `icloud-sync skipped`.
 - iCloud provides no checksums: files are compared by size and modification time.
 - It is not an on-demand filesystem: every synced file takes disk space.
-- A file named `RCLONE_TEST` appears in the Drive root. It is the check file; leave it there.
+- A file named `RCLONE_TEST` appears in the Drive root. It is the check file; leave it there. If you delete it on the PC by mistake it is put back.
 - The program's messages are currently in **Italian**; English is on the [roadmap](ROADMAP.md).
 
 ## Commands

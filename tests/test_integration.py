@@ -147,6 +147,26 @@ class OneShotTests(SyncTestCase):
         (self.tmp / "hidden").rename(self.cloud / "RCLONE_TEST")
         self.sync()
 
+    def test_check_file_deleted_by_mistake_is_restored(self):
+        for i in range(4):
+            (self.pc / f"f{i}.txt").write_text(str(i))
+        self.sync()
+        (self.pc / "RCLONE_TEST").unlink()  # it looks like junk: users delete it while tidying up
+        (self.pc / "new.txt").write_text("1")
+        self.sync()
+        self.assertTrue((self.pc / "RCLONE_TEST").exists())
+        self.assertTrue((self.cloud / "new.txt").exists())
+
+    def test_check_file_is_not_restored_into_a_folder_that_lost_its_files(self):
+        for i in range(4):
+            (self.pc / f"f{i}.txt").write_text(str(i))
+        self.sync()
+        for f in self.pc.iterdir():
+            f.unlink()
+        (self.pc / "stray.txt").write_text("a different disk mounted here?")
+        self.assertEqual(self.ics("sync").returncode, 1)
+        self.assertEqual(len(list(self.cloud.glob("f*.txt"))), 4, "nothing may be deleted on the other side")
+
     def test_lost_bisync_state_is_rebuilt_without_deleting(self):
         (self.pc / "a.txt").write_text("1")
         self.sync()

@@ -17,6 +17,7 @@ Questo è un piano, non una promessa: l'ordine riflette ciò che oggi pesa di pi
 | Vassoio: pausa/riprendi, elementi esclusi, log, rinnovo login | Completare ciò che oggi si fa solo da terminale | |
 | Notifiche con azione ("Rinnova login", "Mostra file") | Meno passaggi quando serve un intervento | |
 | Messaggi in inglese, italiano come traduzione | Il programma oggi parla solo italiano: limita chi può usarlo | gettext; README in inglese |
+| File di controllo nascosto al posto di `RCLONE_TEST` | Oggi è visibile e sembra un file inutile: è già stato eliminato per sbaglio riordinando | Va provato che iCloud accetti un nome che inizia con il punto |
 | Emblema e icona della cartella nel gestore file | Rende visibile che la cartella è sincronizzata | Dolphin e Nautilus |
 
 ## 0.4 — Velocità dal lato iCloud

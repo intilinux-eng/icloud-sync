@@ -128,6 +128,41 @@ class WatcherTests(unittest.TestCase):
         self.assertTrue(w.poll(), "deletion")
 
 
+class NotificationTests(unittest.TestCase):
+    """A passing error must not alarm the user; a persistent one must, exactly once."""
+
+    def setUp(self):
+        self.sent = []
+        self.real_notify, ics.notify = ics.notify, lambda cfg, title, body, urgent=False: self.sent.append(title)
+        self.engine = ics.Engine.__new__(ics.Engine)
+        self.engine.cfg, self.engine.new_skips = {}, 0
+        self.state, self.prev = {}, "ok"
+
+    def tearDown(self):
+        ics.notify = self.real_notify
+
+    def run_sync(self, status):
+        self.engine.announce(self.prev, ics.Result(status, "details"), self.state)
+        self.prev = status
+        return len(self.sent)
+
+    def test_single_error_then_recovery_is_silent(self):
+        self.assertEqual(self.run_sync("error"), 0)
+        self.assertEqual(self.run_sync("ok"), 0)
+
+    def test_repeated_error_alerts_once_and_recovery_is_announced(self):
+        self.assertEqual(self.run_sync("error"), 0)
+        self.assertEqual(self.run_sync("error"), 1)
+        self.assertEqual(self.run_sync("error"), 1)
+        self.assertEqual(self.run_sync("ok"), 2)
+        self.assertIn("iCloud Drive", self.sent[-1])
+
+    def test_problems_that_need_the_user_alert_immediately(self):
+        self.assertEqual(self.run_sync("auth"), 1)
+        self.assertEqual(self.run_sync("auth"), 1)
+        self.assertEqual(self.run_sync("ok"), 2)
+
+
 class PackagingTests(unittest.TestCase):
     def test_packaged_unit_matches_the_generated_one(self):
         expected = ics.UNIT_TEMPLATE.format(homepage=ics.HOMEPAGE, exec="/usr/bin/icloud-sync")
@@ -153,6 +188,10 @@ class TrayTests(unittest.TestCase):
         try:
             ics.save_state({"status": "ok", "last_success": time.time()})
             self.assertEqual(ics.tray_state()[0], "ok")
+            ics.save_state({"status": "error", "error_streak": 1})
+            self.assertEqual(ics.tray_state()[0], "offline", "a first, probably passing error is not shown in red")
+            ics.save_state({"status": "error", "error_streak": 2})
+            self.assertEqual(ics.tray_state()[0], "error")
             ics.save_state({"status": "auth", "message": "trust token expired"})
             kind, _text, hint = ics.tray_state()
             self.assertEqual(kind, "error")

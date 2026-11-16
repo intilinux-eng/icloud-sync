@@ -542,11 +542,12 @@ class Engine:
         self.map_stale = False
         return True
 
-    def known_remote(self) -> tuple[set[str], dict[str, int]] | None:
-        """Stato di iCloud all'ultima sync, letto dagli elenchi di bisync: file noti e dimensione di ogni cartella."""
+    def known_remote(self, side: str = "path2") -> tuple[set[str], dict[str, int]] | None:
+        """Stato all'ultima sync, letto dagli elenchi di bisync (path2 = iCloud, path1 = cartella locale):
+        file noti e dimensione di ogni cartella."""
         work = Path(os.environ.get("XDG_CACHE_HOME") or HOME / ".cache") / "rclone/bisync"
         key = str(self.local).replace("/", "_") + ".."
-        cands = [f for f in work.glob("*.path2.lst") if key in f.name]
+        cands = [f for f in work.glob(f"*.{side}.lst") if key in f.name]
         if len(cands) != 1:
             return None
         files: set[str] = set()
@@ -655,6 +656,23 @@ class Engine:
     def signature(self, filters: str, empty_dirs: bool) -> str:
         blob = json.dumps([str(self.local), self.remote, filters, empty_dirs, self.cfg["check_access"]])
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+    def restore_local_check_file(self) -> bool:
+        """Rimette in locale il file di controllo se è stato eliminato per sbaglio (ha l'aria di un file inutile).
+
+        Lo fa solo se la cartella locale è chiaramente quella vera: almeno metà dei file dell'ultima sync
+        esiste ancora. Una cartella vuota o non montata resta quindi bloccata, come deve.
+        """
+        target = self.local / CHECK_FILE
+        if target.exists():
+            return False
+        known = self.known_remote("path1")
+        others = [f for f in known[0] if f != CHECK_FILE] if known else []
+        if not others or CHECK_FILE not in known[0]:
+            return False
+        if sum((self.local / f).exists() for f in others) * 2 < len(others):
+            return False
+        return self.run(["copyto", remote_join(self.remote, CHECK_FILE), str(target)]).returncode == 0 and target.exists()
 
     def ensure_check_files(self) -> None:
         """Crea il file di controllo dove manca. Chiamato SOLO su richiesta esplicita o al primo avvio."""
@@ -782,6 +800,8 @@ class Engine:
                 resync = "newer"
             if resync and (manual or first) and self.cfg["check_access"]:
                 self.ensure_check_files()
+            elif self.cfg["check_access"] and not dry_run and self.restore_local_check_file():
+                log(f"{CHECK_FILE} mancava nella cartella locale: ripristinato da iCloud")
         except RcloneFailure as e:
             return self.classify(e.rc, e.text), e.text
         except subprocess.TimeoutExpired:
@@ -845,6 +865,7 @@ class Engine:
             st.update(status=res.status, message=res.message, last_attempt=t0, last_duration=round(time.time() - t0, 1))
             if res.ok:
                 st.update(last_success=time.time(), last_counts=res.counts)
+            self.announce(prev, res, st)
             save_state(st)
 
         took = f"{time.time() - t0:.0f}s"
@@ -853,25 +874,31 @@ class Engine:
                 log(f"OK in {took}: {res.message}")
         elif res.status != prev or manual:
             log(f"{STATUS_TEXT.get(res.status, res.status)} — {res.message}")
-        self.announce(prev, res)
         return res
 
-    def announce(self, prev: str | None, res: Result) -> None:
+    def announce(self, prev: str | None, res: Result, st: dict) -> None:
+        """Notifiche desktop. Un errore generico è quasi sempre passeggero (es. una cartella eliminata
+        mentre veniva letta): viene riprovato in silenzio e segnalato solo se si ripete."""
         if self.new_skips:
             notify(self.cfg, "iCloud Drive: elementi esclusi",
                    f"{self.new_skips} elementi non scaricabili da iCloud sono stati esclusi dalla sincronizzazione.\n"
                    f"Elenco:  {APP} skipped")
             self.new_skips = 0
         if res.ok:
-            if prev not in (None, "ok", "offline", "busy"):
+            st["error_streak"] = 0
+            if st.pop("alerted", False):
                 notify(self.cfg, "iCloud Drive", "Sincronizzazione ripristinata.")
             if res.counts.get("conflicts"):
                 notify(self.cfg, "iCloud Drive: conflitto",
                        f"{res.counts['conflicts']} file modificati su entrambi i lati. "
                        "Entrambe le versioni sono state conservate (cerca «.conflict»).")
-        elif res.status not in ("offline", "busy") and res.status != prev:
-            notify(self.cfg, f"iCloud Drive: {STATUS_TEXT[res.status].lstrip('✗ ')}",
-                   f"{res.message}\n{STATUS_HINT.get(res.status, '')}", urgent=True)
+        elif res.status not in ("offline", "busy"):
+            st["error_streak"] = st.get("error_streak", 0) + 1 if res.status == "error" else 0
+            persistent = res.status != "error" or st["error_streak"] >= 2
+            if persistent and (res.status != prev or not st.get("alerted")):
+                st["alerted"] = True
+                notify(self.cfg, f"iCloud Drive: {STATUS_TEXT[res.status].lstrip('✗ ')}",
+                       f"{res.message}\n{STATUS_HINT.get(res.status, '')}", urgent=True)
 
 
 class RcloneFailure(Exception):
@@ -1306,6 +1333,8 @@ def tray_state() -> tuple[str, str, str]:
         return "offline", "Offline: riprendo appena torna la rete", ""
     if status in (None, "busy", "stopped"):
         return "unknown", "In attesa della prima sincronizzazione", ""
+    if status == "error" and st.get("error_streak", 0) < 2:
+        return "offline", "Problema temporaneo: riprovo tra poco", ""
     text = STATUS_TEXT.get(status, status).lstrip("✗… ")
     return "error", text[:1].upper() + text[1:], STATUS_HINT.get(status, "")
 
