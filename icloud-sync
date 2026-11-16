@@ -12,12 +12,14 @@ Nessuna dipendenza oltre a Python >= 3.11 e rclone >= 1.69.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 import errno
 import fcntl
 import fnmatch
 import getpass
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -41,7 +43,7 @@ except ImportError:  # pragma: no cover
     sys.exit("icloud-sync richiede Python 3.11 o successivo.")
 
 APP = "icloud-sync"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 HOME = Path.home()
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / APP
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / APP
@@ -54,9 +56,34 @@ ERR_LOG = STATE_DIR / "last-error.log"
 CHANGE_LOG = STATE_DIR / "last-change.log"
 LOCK_FILE = STATE_DIR / "lock"
 PID_FILE = STATE_DIR / "daemon.pid"
+ACTIVITY_FILE = STATE_DIR / "activity"   # contiene il PID di chi sta sincronizzando in questo momento
+TRAY_LOCK = STATE_DIR / "tray.pid"
 BIN_DIR = HOME / ".local/bin"
 UNIT_NAME = "icloud-sync.service"
 UNIT_PATH = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "systemd/user" / UNIT_NAME
+SYSTEM_UNIT = Path("/usr/lib/systemd/user") / UNIT_NAME   # fornita dal pacchetto .deb
+AUTOSTART_PATH = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "autostart" / f"{APP}-tray.desktop"
+HOMEPAGE = "https://github.com/intilinux-eng/icloud-sync"
+# Deve restare identica a data/icloud-sync.service (lo verifica tests/test_unit.py)
+UNIT_TEMPLATE = """[Unit]
+Description=iCloud Drive sync (icloud-sync)
+Documentation={homepage}
+
+[Service]
+Type=simple
+ExecStart={exec} watch
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=30
+# SIGTERM only to the daemon, which stops rclone cleanly (state is saved)
+KillMode=mixed
+TimeoutStopSec=100
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target
+"""
 MIN_RCLONE = (1, 69)
 CHECK_FILE = "RCLONE_TEST"
 TRUST_DAYS = 30
@@ -70,6 +97,7 @@ DEFAULTS = {
     "debounce": 5,
     "max_wait": 60,
     "max_delete": 25,
+    "max_delete_min_files": 10,
     "conflict_resolve": "newer",
     "check_access": True,
     "auto_resync": True,
@@ -95,6 +123,7 @@ CONFIG_HELP = {
     "debounce": "Secondi di quiete dopo una modifica locale prima di sincronizzare",
     "max_wait": "Attesa massima (secondi) se le modifiche locali non si fermano mai",
     "max_delete": "Blocca la sync se andrebbe eliminato più di questo % di file su un lato",
+    "max_delete_min_files": "…ma solo se i file da eliminare sono più di questo numero (eliminare 1 file su 3 è normale)",
     "conflict_resolve": "File modificato su entrambi i lati: newer | older | larger | smaller | path1 | path2 | none\n# (il perdente non viene mai cancellato: viene rinominato in *.conflictN)",
     "check_access": f"Richiede il file {CHECK_FILE} su entrambi i lati (protegge da elenchi vuoti/errati)",
     "auto_resync": "Ripara da solo lo stato dopo un errore critico (non elimina mai file)",
@@ -113,6 +142,9 @@ AUTH_RE = re.compile(
     r"|invalid (session|credentials)|http error 40[13]|http error 42[13]|config reconnect",
     re.I,
 )
+EMPTY_RE = re.compile(r"empty (current|prior) path[12] listing", re.I)
+LOST_STATE_RE = re.compile(r"must run --resync|cannot find prior path1 or path2 listings", re.I)
+DELETES_RE = re.compile(r"too many deletes \(>\d+%, (\d+) of \d+\)", re.I)
 ACCESS_RE = re.compile(r"access (test|check) failed|failed to find any files named|check file check failed", re.I)
 LST_RE = re.compile(r'^(\S)\s+(-?\d+)\s+\S+\s+\S+\s+\S+\s+"(.*)"$')
 QUICK = ["--no-mimetype", "--retries", "1", "--low-level-retries", "1", "--contimeout", "5s", "--timeout", "15s"]
@@ -139,6 +171,20 @@ def log(msg: str) -> None:
             f.write(line + "\n")
     except OSError:
         pass
+
+
+@contextlib.contextmanager
+def activity():
+    """Segnala (all'icona nel vassoio) che una sincronizzazione è in corso."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        ACTIVITY_FILE.write_text(str(os.getpid()))
+    except OSError:
+        pass
+    try:
+        yield
+    finally:
+        ACTIVITY_FILE.unlink(missing_ok=True)
 
 
 def load_state() -> dict:
@@ -398,6 +444,7 @@ STATUS_TEXT = {
     "auth": "✗ login Apple scaduto o rifiutato",
     "deletes": "✗ bloccato: troppe eliminazioni in una volta",
     "access": "✗ bloccato: file di controllo mancante",
+    "empty": "✗ bloccato: uno dei due lati risulta vuoto",
     "resync-needed": "✗ stato da ricostruire",
     "remote": "✗ iCloud non raggiungibile",
     "error": "✗ errore",
@@ -407,6 +454,7 @@ STATUS_HINT = {
     "auth": f"Esegui:  {APP} login",
     "deletes": f"Se le eliminazioni sono volute:  {APP} sync --force",
     "access": f"Controlla che {CHECK_FILE} esista su entrambi i lati, poi:  {APP} resync",
+    "empty": f"Per sicurezza non elimino nulla. Se è corretto, per ricaricare i file:  {APP} resync",
     "resync-needed": f"Esegui:  {APP} resync",
     "remote": f"Se persiste:  {APP} login   (dettagli: {APP} doctor)",
     "error": f"Dettagli:  {APP} log",
@@ -681,7 +729,9 @@ class Engine:
             return Result("deletes", err)
         if ACCESS_RE.search(text):
             return Result("access", err)
-        if rc == 7 or "must run --resync" in low:
+        if EMPTY_RE.search(text):
+            return Result("empty", err)
+        if LOST_STATE_RE.search(text):
             return Result("resync-needed", err)
         return Result("error", err)
 
@@ -742,15 +792,23 @@ class Engine:
             return Result("stopped", "interrotta su richiesta"), text
         res = self.classify(rc, text)
 
+        if res.status == "deletes" and not force and not dry_run:
+            # La soglia in percentuale ha senso sui grandi numeri: poche eliminazioni sono uso normale.
+            wanted = [int(n) for n in DELETES_RE.findall(text)]
+            if wanted and max(wanted) <= self.cfg["max_delete_min_files"]:
+                rc, text = self.bisync(resync=resync, **{**opts, "force": True})
+                res = self.classify(rc, text)
+
         cooled = time.time() - st.get("last_auto_resync", 0) > AUTO_RESYNC_COOLDOWN
         unsyncable = bool(find_unsyncable(text))
         if (res.status == "resync-needed" and not resync and not dry_run and not unsyncable
                 and self.cfg["auto_resync"] and cooled):
             log(f"Stato bisync non valido ({res.message}): ricostruisco con --resync (nessun file viene eliminato)")
-            st["last_auto_resync"] = time.time()
             resync = "newer"
             rc, text = self.bisync(resync=resync, **opts)
             res = self.classify(rc, text)
+            if res.ok:  # il limite di frequenza serve contro i cicli di ricostruzione, non contro i tentativi falliti
+                st["last_auto_resync"] = time.time()
 
         if res.ok and resync and not dry_run:
             st["baseline"] = sig
@@ -778,7 +836,8 @@ class Engine:
             st = load_state()
             prev = st.get("status")
             t0 = time.time()
-            res = self.attempt(st, resync=resync, dry_run=dry_run, force=force, interactive=interactive, manual=manual)
+            with activity():
+                res = self.attempt(st, resync=resync, dry_run=dry_run, force=force, interactive=interactive, manual=manual)
             if dry_run or res.status == "stopped":
                 return res
             st.update(status=res.status, message=res.message, last_attempt=t0, last_duration=round(time.time() - t0, 1))
@@ -915,7 +974,7 @@ def backoff(status: str, failures: int) -> int:
         return 30
     if status == "busy":
         return 15
-    if status in ("auth", "deletes", "access", "resync-needed"):
+    if status in ("auth", "deletes", "access", "empty", "resync-needed"):
         return 900  # serve l'utente: i comandi login/sync/resync ci svegliano subito
     return min(60 * 2 ** (failures - 1), 900)
 
@@ -986,7 +1045,8 @@ def cmd_watch(cfg: dict, _args) -> int:
                     idle_hits, probe_delay = 0, probe_every
                 continue
             by_probe = True
-            pulled = eng.fast_pull()
+            with activity():
+                pulled = eng.fast_pull()
             if flags["stop"]:
                 break
             if pulled:
@@ -1047,16 +1107,27 @@ def login_reminder(cfg: dict) -> None:
                f"Il login Apple scade tra circa {max(0, int(left))} giorni.\nRinnovalo con:  {APP} login")
 
 
-def poke_daemon() -> bool:
-    """Chiede al demone di sincronizzare subito."""
+def pid_of(pidfile: Path) -> int | None:
+    """PID scritto in un file, solo se appartiene davvero a un nostro processo ancora vivo."""
     try:
-        pid = int(PID_FILE.read_text())
+        pid = int(pidfile.read_text())
         if APP.encode() in Path(f"/proc/{pid}/cmdline").read_bytes():
-            os.kill(pid, signal.SIGUSR1)
-            return True
+            return pid
     except (OSError, ValueError):
         pass
-    return False
+    return None
+
+
+def poke_daemon() -> bool:
+    """Chiede al demone di sincronizzare subito."""
+    pid = pid_of(PID_FILE)
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, signal.SIGUSR1)
+    except OSError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------- comandi
@@ -1141,9 +1212,15 @@ def systemctl(*args: str, quiet: bool = False) -> subprocess.CompletedProcess:
     return subprocess.run(["systemctl", "--user", *args], capture_output=quiet, text=True)
 
 
+def is_system_install() -> bool:
+    return Path(__file__).resolve().parent in (Path("/usr/bin"), Path("/usr/local/bin"))
+
+
 def installed_script() -> Path:
-    """Copia questo file in ~/.local/bin, così il servizio non dipende da dove è stato scaricato."""
+    """Percorso stabile del programma: quello di sistema (.deb) oppure una copia in ~/.local/bin."""
     me = Path(__file__).resolve()
+    if is_system_install():
+        return me
     target = BIN_DIR / APP
     if me != target.resolve():
         BIN_DIR.mkdir(parents=True, exist_ok=True)
@@ -1153,44 +1230,214 @@ def installed_script() -> Path:
     return target
 
 
+def has_tray_support() -> bool:
+    return importlib.util.find_spec("PyQt6") is not None
+
+
+def start_tray(script: Path) -> None:
+    if pid_of(TRAY_LOCK) is None and (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")):
+        subprocess.Popen([sys.executable, str(script), "tray"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
 def cmd_enable(cfg: dict, _args) -> int:
     script = installed_script()
-    UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    UNIT_PATH.write_text(f"""[Unit]
-Description=Sincronizzazione iCloud Drive ({APP})
-Documentation=https://rclone.org/bisync/
-
-[Service]
-Type=simple
-ExecStart="{sys.executable}" "{script}" watch
-Environment=PYTHONUNBUFFERED=1
-Restart=on-failure
-RestartSec=30
-# SIGTERM solo al demone, che ferma rclone in modo pulito (salvataggio dello stato)
-KillMode=mixed
-TimeoutStopSec=100
-Nice=10
-IOSchedulingClass=idle
-
-[Install]
-WantedBy=default.target
-""")
+    if is_system_install() and SYSTEM_UNIT.exists():
+        UNIT_PATH.unlink(missing_ok=True)  # una vecchia unità personale nasconderebbe quella del pacchetto
+    else:
+        UNIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        UNIT_PATH.write_text(UNIT_TEMPLATE.format(homepage=HOMEPAGE, exec=f'"{sys.executable}" "{script}"'))
     systemctl("daemon-reload")
     rc = systemctl("enable", "--now", UNIT_NAME).returncode
-    if rc == 0:
-        systemctl("restart", UNIT_NAME)
-        say("✓ Servizio attivo: parte da solo a ogni accesso.")
-        if str(BIN_DIR) not in os.environ.get("PATH", "").split(":"):
-            say(f"Nota: {BIN_DIR} non è nel PATH; aggiungilo o usa il percorso completo.")
-    return rc
+    if rc != 0:
+        return rc
+    systemctl("restart", UNIT_NAME)
+    say("✓ Servizio attivo: parte da solo a ogni accesso.")
+    if has_tray_support():
+        AUTOSTART_PATH.parent.mkdir(parents=True, exist_ok=True)
+        AUTOSTART_PATH.write_text(
+            "[Desktop Entry]\nType=Application\nName=iCloud Drive Sync\n"
+            f'Exec="{sys.executable}" "{script}" tray\nIcon={APP}\nTerminal=false\n'
+            "X-GNOME-Autostart-enabled=true\nX-KDE-autostart-phase=2\n")
+        start_tray(script)
+        say("✓ Icona nel vassoio di sistema attiva.")
+    else:
+        say("Per l'icona nel vassoio installa PyQt6 (sudo apt install python3-pyqt6) e ripeti il comando.")
+    if not is_system_install() and str(BIN_DIR) not in os.environ.get("PATH", "").split(":"):
+        say(f"Nota: {BIN_DIR} non è nel PATH; aggiungilo o usa il percorso completo.")
+    return 0
 
 
 def cmd_disable(_cfg: dict, _args) -> int:
     systemctl("disable", "--now", UNIT_NAME)
     UNIT_PATH.unlink(missing_ok=True)
     systemctl("daemon-reload")
-    say("Servizio disattivato. Configurazione e file restano dove sono.")
+    AUTOSTART_PATH.unlink(missing_ok=True)
+    tray = pid_of(TRAY_LOCK)
+    if tray:
+        with contextlib.suppress(OSError):
+            os.kill(tray, signal.SIGTERM)
+    say("Servizio e icona disattivati. Configurazione e file restano dove sono.")
     return 0
+
+
+# ---------------------------------------------------------------- icona nel vassoio
+
+def is_syncing() -> bool:
+    try:
+        return Path(f"/proc/{int(ACTIVITY_FILE.read_text())}").exists()
+    except (OSError, ValueError):
+        return False
+
+
+def tray_state() -> tuple[str, str, str]:
+    """(tipo, testo, suggerimento) per l'icona: ok | sync | error | offline | stopped | unknown."""
+    st = load_state()
+    status = st.get("status")
+    if is_syncing():
+        return "sync", "Sincronizzazione in corso…", ""
+    if pid_of(PID_FILE) is None:
+        return "stopped", "Sincronizzazione automatica ferma", f"Avvia con:  {APP} enable"
+    if status == "ok":
+        return "ok", f"Sincronizzato {ago(st.get('last_success'))}", ""
+    if status == "offline":
+        return "offline", "Offline: riprendo appena torna la rete", ""
+    if status in (None, "busy", "stopped"):
+        return "unknown", "In attesa della prima sincronizzazione", ""
+    text = STATUS_TEXT.get(status, status).lstrip("✗… ")
+    return "error", text[:1].upper() + text[1:], STATUS_HINT.get(status, "")
+
+
+def tray_pixmap(QtCore, QtGui, kind: str, size: int = 64):
+    """Disegna l'icona (nuvola + bollino di stato) senza dipendere da temi o file esterni."""
+    Qt = QtCore.Qt
+    pm = QtGui.QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QtGui.QPainter(pm)
+    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+    p.scale(size / 64, size / 64)
+    cloud = QtGui.QPainterPath()
+    cloud.setFillRule(Qt.FillRule.WindingFill)
+    cloud.addEllipse(QtCore.QRectF(3, 24, 26, 26))
+    cloud.addEllipse(QtCore.QRectF(15, 9, 32, 32))
+    cloud.addEllipse(QtCore.QRectF(37, 22, 24, 24))
+    cloud.addRoundedRect(QtCore.QRectF(12, 30, 42, 20), 10, 10)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QtGui.QColor("#3daee9" if kind in ("ok", "sync", "error") else "#9aa3ad"))
+    p.drawPath(cloud.simplified())
+    badge = {"ok": "#27ae60", "sync": "#1d6fa5", "error": "#da4453", "stopped": "#6b7680", "offline": "#6b7680"}.get(kind)
+    if badge:
+        c = QtCore.QPointF(47, 47)
+        p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_Clear)
+        p.drawEllipse(c, 16.5, 16.5)  # stacco trasparente tra nuvola e bollino
+        p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_SourceOver)
+        p.setBrush(QtGui.QColor(badge))
+        p.drawEllipse(c, 14, 14)
+        pen = QtGui.QPen(QtGui.QColor("white"), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        if kind == "ok":
+            p.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(40, 47.5), QtCore.QPointF(45, 52.5), QtCore.QPointF(54, 42)]))
+        elif kind == "sync":
+            p.drawArc(QtCore.QRectF(40, 40, 14, 14), 60 * 16, 250 * 16)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QtGui.QColor("white"))
+            p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(49, 36), QtCore.QPointF(56.5, 41), QtCore.QPointF(48.5, 45)]))
+        elif kind == "error":
+            p.drawLine(QtCore.QPointF(47, 39.5), QtCore.QPointF(47, 48.5))
+            p.drawPoint(QtCore.QPointF(47, 55))
+        elif kind == "stopped":
+            p.drawLine(QtCore.QPointF(43, 41.5), QtCore.QPointF(43, 52.5))
+            p.drawLine(QtCore.QPointF(51, 41.5), QtCore.QPointF(51, 52.5))
+        else:  # offline
+            p.drawLine(QtCore.QPointF(40.5, 47), QtCore.QPointF(53.5, 47))
+    p.end()
+    return pm
+
+
+def cmd_tray(cfg: dict, _args) -> int:
+    try:
+        from PyQt6 import QtCore, QtGui, QtWidgets
+    except ImportError:
+        sys.exit("Per l'icona nel vassoio serve PyQt6:  sudo apt install python3-pyqt6")
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    lock = TRAY_LOCK.open("a+")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        say("L'icona nel vassoio è già attiva.")
+        return 0
+    lock.seek(0)
+    lock.truncate()
+    lock.write(str(os.getpid()))
+    lock.flush()
+
+    app = QtWidgets.QApplication([APP])
+    app.setApplicationName(APP)
+    app.setApplicationDisplayName("iCloud Drive")
+    app.setDesktopFileName(APP)
+    app.setQuitOnLastWindowClosed(False)
+    local = Path(os.path.expanduser(cfg["local"])).absolute()
+    script = Path(__file__).resolve()
+
+    tray = QtWidgets.QSystemTrayIcon()
+    menu = QtWidgets.QMenu()
+    status_item = menu.addAction("")
+    status_item.setEnabled(False)
+    hint_item = menu.addAction("")
+    hint_item.setEnabled(False)
+    menu.addSeparator()
+    open_item = menu.addAction(QtGui.QIcon.fromTheme("folder-open"), "Apri cartella iCloud Drive")
+    sync_item = menu.addAction(QtGui.QIcon.fromTheme("view-refresh"), "Sincronizza ora")
+    menu.addSeparator()
+    quit_item = menu.addAction(QtGui.QIcon.fromTheme("application-exit"), "Chiudi icona")
+
+    def open_folder() -> None:
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(local)))
+
+    def sync_now() -> None:
+        if not poke_daemon():  # servizio fermo: una sincronizzazione singola
+            subprocess.Popen([sys.executable, str(script), "sync"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+    def on_click(reason) -> None:
+        if reason == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger:
+            open_folder()
+
+    open_item.triggered.connect(open_folder)
+    sync_item.triggered.connect(sync_now)
+    quit_item.triggered.connect(app.quit)
+    tray.activated.connect(on_click)
+    tray.setContextMenu(menu)
+
+    icons: dict[str, object] = {}
+    shown: list[object] = [None]
+
+    def refresh() -> None:
+        state = tray_state()
+        if state == shown[0]:
+            return
+        shown[0] = state
+        kind, text, hint = state
+        if kind not in icons:
+            icons[kind] = QtGui.QIcon(tray_pixmap(QtCore, QtGui, kind))
+        tray.setIcon(icons[kind])
+        tray.setToolTip(f"iCloud Drive — {text}")
+        status_item.setText(text)
+        hint_item.setText(hint)
+        hint_item.setVisible(bool(hint))
+        sync_item.setEnabled(kind != "sync")
+
+    refresh()
+    tray.show()
+    timer = QtCore.QTimer()
+    timer.timeout.connect(refresh)  # il timer fa anche girare l'interprete, così i segnali vengono serviti
+    timer.start(2000)
+    signal.signal(signal.SIGTERM, lambda *_: app.quit())
+    signal.signal(signal.SIGINT, lambda *_: app.quit())
+    rc = app.exec()
+    tray.hide()
+    return rc
 
 
 def cmd_restart(_cfg: dict, _args) -> int:
@@ -1225,7 +1472,7 @@ def cmd_status(cfg: dict, args) -> int:
     say(f"  Servizio:   {service_state()}")
     if st.get("last_login"):
         left = TRUST_DAYS - (time.time() - st["last_login"]) / 86400
-        say(f"  Login:      " + (f"valido ancora ~{int(left)} giorni" if left > 0 else f"probabilmente scaduto → {APP} login"))
+        say("  Login:      " + (f"valido ancora ~{int(left)} giorni" if left > 0 else f"probabilmente scaduto → {APP} login"))
     return 0 if status == "ok" else 1
 
 
@@ -1370,10 +1617,11 @@ def main() -> int:
     p = add("login", cmd_login, "(ri)autentica l'Apple ID: serve circa ogni 30 giorni")
     p.add_argument("--new-password", action="store_true", help="reinserisci Apple ID e password")
     p.add_argument("--reset", action="store_true", help="azzera cookie e token salvati prima di riprovare")
-    add("enable", cmd_enable, "installa e avvia il servizio in background (systemd utente)")
-    add("disable", cmd_disable, "ferma e rimuove il servizio")
+    add("enable", cmd_enable, "avvia il servizio in background e l'icona nel vassoio, a ogni accesso")
+    add("disable", cmd_disable, "ferma servizio e icona")
     add("restart", cmd_restart, "riavvia il servizio (dopo aver cambiato la configurazione)")
     add("watch", cmd_watch, "esegue il demone in primo piano (usato dal servizio)")
+    add("tray", cmd_tray, "icona nel vassoio di sistema: stato, apri cartella, sincronizza ora")
     p = add("log", cmd_log, "mostra le ultime righe del log")
     p.add_argument("-n", "--lines", type=int, default=40)
     p.add_argument("--error", action="store_true", help="log completo di rclone dell'ultima sync fallita")
