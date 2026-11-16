@@ -87,7 +87,10 @@ IOSchedulingClass=idle
 WantedBy=default.target
 """
 MIN_RCLONE = (1, 69)
-CHECK_FILE = "RCLONE_TEST"
+CHECK_FILE = ".icloud-sync-check"   # nascosto: quello visibile sembrava un file inutile e veniva eliminato
+OLD_CHECK_FILE = "RCLONE_TEST"      # nome usato fino alla 0.2, convertito automaticamente
+CHECK_TEXT = (f"File di controllo di {APP}: non eliminarlo.\n"
+              "Serve a verificare che entrambi i lati siano davvero raggiungibili prima di sincronizzare.\n")
 TRUST_DAYS = 30
 AUTO_RESYNC_COOLDOWN = 6 * 3600
 
@@ -674,6 +677,35 @@ class Engine:
             return False
         return self.run(["copyto", remote_join(self.remote, CHECK_FILE), str(target)]).returncode == 0 and target.exists()
 
+    def migrate_check_file(self) -> bool:
+        """Converte il vecchio file di controllo visibile in quello nascosto.
+
+        Solo se il vecchio esiste in locale e iCloud ha almeno uno dei due: cioè quando la protezione
+        attuale è soddisfatta. I due lati cambiano allo stesso modo, quindi bisync non vede conflitti.
+        """
+        old, new = self.local / OLD_CHECK_FILE, self.local / CHECK_FILE
+        if new.exists() or not old.is_file():
+            return False
+        p = self.run(["lsf", self.remote, "--max-depth", "1", "--files-only",
+                      "--include", f"/{OLD_CHECK_FILE}", "--include", f"/{CHECK_FILE}"])
+        if p.returncode != 0:
+            return False
+        on_remote = set(p.stdout.splitlines())
+        if CHECK_FILE in on_remote:  # già convertito da un altro PC
+            if self.run(["copyto", remote_join(self.remote, CHECK_FILE), str(new)]).returncode != 0:
+                return False
+        elif OLD_CHECK_FILE in on_remote:
+            new.write_text(CHECK_TEXT)
+            if self.run(["copyto", str(new), remote_join(self.remote, CHECK_FILE)]).returncode != 0:
+                new.unlink(missing_ok=True)
+                return False
+        else:
+            return False  # nessun file di controllo su iCloud: situazione anomala, resta bloccato
+        if OLD_CHECK_FILE in on_remote:
+            self.run(["deletefile", remote_join(self.remote, OLD_CHECK_FILE)])
+        old.unlink(missing_ok=True)
+        return True
+
     def ensure_check_files(self) -> None:
         """Crea il file di controllo dove manca. Chiamato SOLO su richiesta esplicita o al primo avvio."""
         lf = self.local / CHECK_FILE
@@ -684,8 +716,7 @@ class Engine:
             p = self.run(["copyto", rf, str(lf)])
         elif not on_remote:
             if not lf.exists():
-                lf.write_text(f"File di controllo di {APP}: non eliminarlo.\n"
-                              "Serve a verificare che entrambi i lati siano davvero raggiungibili prima di sincronizzare.\n")
+                lf.write_text(CHECK_TEXT)
             p = self.run(["copyto", str(lf), rf])
         if p.returncode != 0 and not (on_remote and lf.exists()):
             raise RcloneFailure(p.returncode, p.stderr)
@@ -798,6 +829,8 @@ class Engine:
             if first and not resync:
                 log("Prima sincronizzazione (o configurazione cambiata): allineo i due lati senza eliminare nulla")
                 resync = "newer"
+            if self.cfg["check_access"] and not dry_run and self.migrate_check_file():
+                log(f"File di controllo convertito: {OLD_CHECK_FILE} → {CHECK_FILE} (nascosto)")
             if resync and (manual or first) and self.cfg["check_access"]:
                 self.ensure_check_files()
             elif self.cfg["check_access"] and not dry_run and self.restore_local_check_file():

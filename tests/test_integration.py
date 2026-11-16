@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import SCRIPT, find_rclone  # noqa: E402
 
 RCLONE = find_rclone()
+CHECK = ".icloud-sync-check"
 
 
 @unittest.skipUnless(RCLONE, "rclone >= 1.69 not found (run: ./icloud-sync install-rclone)")
@@ -70,7 +71,7 @@ class OneShotTests(SyncTestCase):
         self.assertEqual((self.cloud / "mine.txt").read_text(), "from the pc")
         self.assertTrue((self.pc / "Empty").is_dir(), "empty folders are synced")
         self.assertFalse((self.cloud / ".DS_Store").exists(), "excluded files stay local")
-        self.assertTrue((self.pc / "RCLONE_TEST").exists() and (self.cloud / "RCLONE_TEST").exists())
+        self.assertTrue((self.pc / CHECK).exists() and (self.cloud / CHECK).exists())
         self.assertEqual(self.ics("status").returncode, 0)
 
     def test_changes_travel_in_both_directions(self):
@@ -138,24 +139,42 @@ class OneShotTests(SyncTestCase):
         self.sync()
         (self.pc / "b.txt").write_text("2")
         self.sync()
-        (self.cloud / "RCLONE_TEST").rename(self.tmp / "hidden")
+        (self.cloud / CHECK).rename(self.tmp / "hidden")
         (self.cloud / "a.txt").unlink()
         blocked = self.ics("sync")
         self.assertEqual(blocked.returncode, 1)
-        self.assertIn("RCLONE_TEST", blocked.stdout)
+        self.assertIn(CHECK, blocked.stdout)
         self.assertTrue((self.pc / "a.txt").exists(), "a remote that looks wrong must not delete local files")
-        (self.tmp / "hidden").rename(self.cloud / "RCLONE_TEST")
+        (self.tmp / "hidden").rename(self.cloud / CHECK)
         self.sync()
 
     def test_check_file_deleted_by_mistake_is_restored(self):
         for i in range(4):
             (self.pc / f"f{i}.txt").write_text(str(i))
         self.sync()
-        (self.pc / "RCLONE_TEST").unlink()  # it looks like junk: users delete it while tidying up
+        (self.pc / CHECK).unlink()  # it looks like junk: users delete it while tidying up
         (self.pc / "new.txt").write_text("1")
         self.sync()
-        self.assertTrue((self.pc / "RCLONE_TEST").exists())
+        self.assertTrue((self.pc / CHECK).exists())
         self.assertTrue((self.cloud / "new.txt").exists())
+
+    def test_visible_check_file_of_older_versions_is_converted(self):
+        (self.pc / "a.txt").write_text("1")
+        self.sync()
+        # Rebuild what a 0.2 installation looks like: RCLONE_TEST on both sides and in bisync's listings.
+        for side in (self.pc, self.cloud):
+            (side / CHECK).rename(side / "RCLONE_TEST")
+        for listing in (self.tmp / "cache" / "rclone" / "bisync").glob("*.lst*"):
+            listing.write_text(listing.read_text().replace(f'"{CHECK}"', '"RCLONE_TEST"'))
+        (self.pc / "b.txt").write_text("2")
+        out = self.sync().stdout
+        self.assertIn("RCLONE_TEST", out)
+        for side in (self.pc, self.cloud):
+            self.assertTrue((side / CHECK).exists(), side)
+            self.assertFalse((side / "RCLONE_TEST").exists(), side)
+        self.assertTrue((self.cloud / "b.txt").exists())
+        self.sync()
+        self.assert_in_sync()
 
     def test_check_file_is_not_restored_into_a_folder_that_lost_its_files(self):
         for i in range(4):

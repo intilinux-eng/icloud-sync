@@ -37,7 +37,7 @@ class ConfigTests(unittest.TestCase):
         excluded = ics.exclude_matcher(ics.DEFAULTS["exclude"])
         for name in (".DS_Store", ".~lock.report.odt#", "movie.mp4.part", "x.3f9a1c22.partial", ".Trash-1000"):
             self.assertTrue(excluded(name), name)
-        for name in ("report.odt", "RCLONE_TEST", "partial.txt"):
+        for name in ("report.odt", ".icloud-sync-check", "partial.txt"):
             self.assertFalse(excluded(name), name)
 
 
