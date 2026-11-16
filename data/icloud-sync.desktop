@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=iCloud Drive Sync
+GenericName=Cloud Synchronization
+GenericName[it]=Sincronizzazione cloud
+Comment=Two-way iCloud Drive synchronization (status icon)
+Comment[it]=Sincronizzazione bidirezionale di iCloud Drive (icona di stato)
+Exec=icloud-sync tray
+Icon=icloud-sync
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=icloud;apple;drive;sync;cloud;rclone;
+StartupNotify=false

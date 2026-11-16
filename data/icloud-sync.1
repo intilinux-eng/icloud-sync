@@ -1,0 +1,60 @@
+.TH ICLOUD-SYNC 1 "2026" "icloud-sync" "User Commands"
+.SH NAME
+icloud-sync \- two-way iCloud Drive synchronization for Linux
+.SH SYNOPSIS
+.B icloud-sync
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B icloud-sync
+keeps a local folder in two-way sync with iCloud Drive. It drives
+.BR rclone (1)
+(bisync with the iclouddrive backend) and adds a background service that
+reacts to local changes through inotify, a lightweight check for remote
+changes, safety checks against mass deletion, automatic recovery, Apple
+login renewal reminders and a system tray icon.
+.SH COMMANDS
+.TP
+.B setup
+Guided configuration: rclone, Apple login, first sync, background service.
+.TP
+.B status
+Show the synchronization state.
+.TP
+.BR sync " [" \-\-dry\-run "] [" \-\-force ]
+Synchronize now.
+.TP
+.BR resync " [" \-\-prefer " newer|local|icloud]"
+Realign both sides from scratch; nothing is deleted.
+.TP
+.BR login " [" \-\-new\-password "] [" \-\-reset ]
+Authenticate the Apple ID again (needed about every 30 days).
+.TP
+.BR enable ", " disable ", " restart
+Manage the background service and the tray icon.
+.TP
+.B tray
+Run the system tray icon (needs PyQt6).
+.TP
+.BR skipped " [" \-\-retry ]
+List items iCloud does not let rclone download.
+.TP
+.BR log " [" \-n " N] [" \-\-error ]
+Show recent activity.
+.TP
+.B doctor
+Run a full diagnostic.
+.TP
+.B install\-rclone
+Install or update the official rclone binary in ~/.local/bin.
+.SH FILES
+.TP
+.I ~/.config/icloud-sync/config.toml
+Configuration (commented).
+.TP
+.I ~/.local/state/icloud-sync/
+State and logs.
+.SH SEE ALSO
+.BR rclone (1)
+.PP
+https://github.com/intilinux-eng/icloud-sync

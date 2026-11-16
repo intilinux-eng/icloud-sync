@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <title>icloud-sync</title>
+  <g fill="#3daee9">
+    <circle cx="16" cy="37" r="13"/>
+    <circle cx="31" cy="25" r="16"/>
+    <circle cx="49" cy="34" r="12"/>
+    <rect x="12" y="30" width="42" height="20" rx="10"/>
+  </g>
+  <circle cx="47" cy="47" r="16.5" fill="#ffffff"/>
+  <circle cx="47" cy="47" r="14" fill="#1d6fa5"/>
+  <path d="M 50.5 40.9 A 7 7 0 1 0 53.6 49.4" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round"/>
+  <path d="M 49 36 L 56.5 41 L 48.5 45 Z" fill="#ffffff"/>
+</svg>
