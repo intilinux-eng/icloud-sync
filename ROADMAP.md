@@ -37,6 +37,7 @@ Questo è un piano, non una promessa: l'ordine riflette ciò che oggi pesa di pi
 | RPM (Fedora, openSUSE) e AUR (Arch) | Il programma è un solo file Python: il lavoro è di impacchettamento |
 | Verifica della firma di rclone nell'installatore | Oggi si verifica solo il checksum, scaricato dallo stesso sito |
 | `CONTRIBUTING`, `SECURITY`, modelli per le segnalazioni | Per accogliere contributi e bug report |
+| Icona nel vassoio anche con PySide6 (LGPL) | Oggi serve PyQt6, che è GPL-3.0: con PySide6 l'intero programma resterebbe sotto licenze permissive |
 
 ## 0.6 — Funzioni
 

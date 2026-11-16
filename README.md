@@ -25,6 +25,9 @@
 
 Apple ships no iCloud client for Linux. `icloud-sync` gives you a folder, `~/iCloudDrive`, that behaves the way you expect: save a file on the PC and it shows up on your iPhone; add one from the phone and it lands on the PC, usually within half a minute.
 
+> [!IMPORTANT]
+> Unofficial, independent project, **provided without any warranty**. It talks to iCloud through an API Apple does not document or support for third parties. Keep a backup of anything you cannot afford to lose.
+
 It does not reimplement Apple's private API. It drives [rclone](https://rclone.org/iclouddrive/), which maintains the hard part (Apple sign-in, two-factor, Advanced Data Protection), and adds everything a daily-use sync client needs on top.
 
 ## Quick start
@@ -85,19 +88,16 @@ There is no push channel from iCloud that third-party clients can use, so this i
 ## How it works
 
 ```mermaid
-flowchart LR
-    subgraph PC["Your Linux PC"]
-        F["~/iCloudDrive"]
-        D["icloud-sync daemon<br/>systemd user service"]
-        T["Tray icon"]
-    end
+flowchart TB
+    F["~/iCloudDrive<br/>your local folder"]
+    D["icloud-sync daemon<br/>systemd user service"]
+    T["Tray icon"]
     R["rclone<br/>bisync + iclouddrive backend"]
     C[("iCloud Drive")]
     F -- "inotify: a file changed" --> D
-    D -- "every 10 s: did any folder etag change?" --> R
-    D -- "only if so: two-way sync" --> R
-    R <--> C
     D -- "state" --> T
+    D -- "every 10 s: did any folder etag change?<br/>only if so: two-way sync" --> R
+    R <--> C
 ```
 
 - **Engine.** `rclone bisync` does the two-way reconciliation, with `--resilient --recover --check-access --max-delete`.
@@ -155,8 +155,19 @@ The integration tests run the real program against a real rclone between two loc
 
 What is planned next: [ROADMAP.md](ROADMAP.md). What changed: [CHANGELOG.md](CHANGELOG.md).
 
-## License
+## License and third-party software
 
-[MIT](LICENSE). Provided without any warranty: keep a backup of anything you cannot afford to lose.
+icloud-sync is released under the [MIT License](LICENSE): you may use, modify and redistribute it, keeping the copyright notice. It is provided **"as is", without warranty of any kind**; the authors are not liable for any damage or data loss.
 
-Independent project, not affiliated with Apple Inc. iCloud is a trademark of Apple Inc.
+It relies on software it does not include or redistribute:
+
+| Software | License | How it is used |
+|---|---|---|
+| [rclone](https://rclone.org) | MIT | run as an external program; `install-rclone` downloads the official binary from rclone.org to your home folder |
+| [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) | GPL-3.0 | optional, only for the tray icon; installed from your distribution |
+| [Qt](https://www.qt.io) | LGPL-3.0 | through PyQt6 |
+| Python standard library | PSF-2.0 | everything else |
+
+The MIT License is compatible with the GPL, so combining the two is allowed. Be aware that when you run the tray icon, the combination with PyQt6 is governed by the GPL-3.0; the rest of the program does not load PyQt6 at all.
+
+Independent project, not affiliated with, endorsed by or sponsored by Apple Inc. iCloud, iCloud Drive, iPhone and Mac are trademarks of Apple Inc. They are used here only to say what the software works with.

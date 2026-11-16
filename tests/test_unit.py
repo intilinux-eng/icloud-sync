@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Unit tests: no network, no rclone."""
 import os
 import sys

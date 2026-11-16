@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Integration tests: the real program driving a real rclone between two local folders.
 
 "cloud" stands in for iCloud Drive. The iCloud-specific fast lane (folder etags) cannot run

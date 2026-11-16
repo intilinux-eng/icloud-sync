@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Shared helpers: load the extension-less program as a module and locate rclone."""
 import importlib.machinery
 import importlib.util

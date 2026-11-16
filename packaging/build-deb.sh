@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: MIT
 # Builds dist/icloud-sync_<version>_all.deb from the working tree.
 # Needs only dpkg-deb; the version comes from the program itself.
 set -eu

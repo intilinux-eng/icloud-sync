@@ -114,6 +114,19 @@ I test di integrazione usano il programma vero e un rclone vero tra due cartelle
 
 Sviluppi previsti: [ROADMAP.md](ROADMAP.md).
 
-## Licenza
+## Licenza e software di terzi
 
-MIT — vedi [LICENSE](LICENSE).
+icloud-sync è distribuito con [licenza MIT](LICENSE): puoi usarlo, modificarlo e ridistribuirlo mantenendo la nota di copyright. È fornito **"così com'è", senza alcuna garanzia**; gli autori non rispondono di danni o perdite di dati.
+
+Si appoggia a software che non include e non ridistribuisce:
+
+| Software | Licenza | Come viene usato |
+|---|---|---|
+| [rclone](https://rclone.org) | MIT | eseguito come programma esterno; `install-rclone` scarica il binario ufficiale da rclone.org nella tua cartella personale |
+| [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) | GPL-3.0 | facoltativo, solo per l'icona nel vassoio; installato dalla tua distribuzione |
+| [Qt](https://www.qt.io) | LGPL-3.0 | tramite PyQt6 |
+| Libreria standard di Python | PSF-2.0 | tutto il resto |
+
+La licenza MIT è compatibile con la GPL, quindi la combinazione è permessa. Tieni presente che, quando usi l'icona nel vassoio, l'insieme con PyQt6 è regolato dalla GPL-3.0; il resto del programma non carica affatto PyQt6.
+
+Progetto indipendente, non affiliato, approvato o sponsorizzato da Apple Inc. iCloud, iCloud Drive, iPhone e Mac sono marchi di Apple Inc., usati qui solo per indicare con cosa funziona il software.

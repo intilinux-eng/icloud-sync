@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Antonio Rosario Intilisano (InTiLinuX)
 """icloud-sync — sincronizzazione bidirezionale di iCloud Drive su Linux.
 
 Motore: `rclone bisync` (backend iclouddrive). Questo programma aggiunge:
@@ -1556,7 +1558,8 @@ def cmd_doctor(cfg: dict, _args) -> int:
 
 
 def cmd_setup(_cfg, _args) -> int:
-    say(f"=== {APP}: configurazione guidata ===\n")
+    say(f"=== {APP}: configurazione guidata ===")
+    say("Software libero (licenza MIT), fornito senza alcuna garanzia: tieni un backup dei file importanti.\n")
     cfg = load_config(required=False)
 
     rclone = find_rclone(cfg)
@@ -1597,7 +1600,9 @@ def cmd_setup(_cfg, _args) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(prog=APP, description="Sincronizzazione bidirezionale di iCloud Drive su Linux (motore: rclone bisync).")
+    ap = argparse.ArgumentParser(
+        prog=APP, description="Sincronizzazione bidirezionale di iCloud Drive su Linux (motore: rclone bisync).",
+        epilog=f"Software libero con licenza MIT, fornito SENZA ALCUNA GARANZIA. Progetto indipendente, non affiliato ad Apple. {HOMEPAGE}")
     ap.add_argument("--version", action="version", version=f"{APP} {VERSION}")
     sub = ap.add_subparsers(dest="cmd", metavar="comando")
 
