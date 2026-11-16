@@ -76,8 +76,10 @@ python3 icloud-sync setup
 
 **A desktop citizen**
 
-- Tray icon with the state at a glance, *Open folder* and *Sync now*.
-- Notifications when a file arrives, when a conflict was kept, or when you need to act.
+- Tray icon with the state at a glance: *Open folder*, *Sync now*, *Pause*, the activity log and the items that were skipped.
+- A window for the Apple sign-in, so renewing it every 30 days does not need a terminal.
+- Notifications with buttons: *Show* on a file that just arrived, *Renew sign-in* when Apple asks for it.
+- A cloud icon on the synced folder in Dolphin.
 - A reminder four days before the Apple sign-in expires (Apple requires a new one about every 30 days).
 - systemd user service, man page, menu entry, Debian package.
 
@@ -131,7 +133,8 @@ flowchart TB
 icloud-sync setup            guided configuration
 icloud-sync status           state, last sync, days left on the Apple sign-in
 icloud-sync sync             sync now (--dry-run to preview)
-icloud-sync login            renew the Apple sign-in
+icloud-sync login            renew the Apple sign-in (--gui for a window)
+icloud-sync pause|resume     suspend and resume automatic sync
 icloud-sync skipped          items iCloud will not let rclone download
 icloud-sync log              recent activity
 icloud-sync doctor           full diagnostic
@@ -157,7 +160,7 @@ Choose icloud-sync if you want a full local copy that syncs both ways, a `.deb` 
 
 Priorities follow daily use, so this is a plan, not a promise.
 
-- **0.3, ease of use.** A graphical window for the Apple sign-in; more tray actions (pause, skipped items, log); English messages, with Italian as a translation.
+- **0.3, ease of use.** Done in the development version: sign-in window, pause, log and skipped items in the tray, notifications with buttons, hidden check file. Still to do: English messages, with Italian as a translation.
 - **0.4, a faster iCloud side.** A persistent rclone process, worth 6–7 seconds on the fast lane; deletions and edits through the fast lane too; quicker detection of renames.
 - **0.5, distribution.** A signed APT repository so updates arrive with `apt upgrade`; RPM and AUR packages; the tray icon on PySide6 (LGPL) as an alternative to PyQt6.
 - **0.6, features.** A local trash for files deleted or overwritten from iCloud; selective sync; more than one account.

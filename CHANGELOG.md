@@ -4,6 +4,17 @@ Le versioni seguono [Semantic Versioning](https://semver.org/lang/it/). Finché 
 
 ## Non ancora rilasciato
 
+### Aggiunto
+
+- Finestra grafica per l'accesso Apple (`icloud-sync login --gui`, o dal vassoio): Apple ID, password e codice a due fattori senza terminale. Provata contro un rclone simulato; non ancora contro un vero rinnovo con Apple.
+- Vassoio: *Metti in pausa / Riprendi*, *Elementi esclusi* con «Riprova tutti», *Registro attività*, *Rinnova accesso Apple* con i giorni rimasti.
+- Comandi `pause` e `resume`: la pausa sopravvive al riavvio e alla ripresa si recupera tutto ciò che è cambiato.
+- Notifiche con pulsanti: *Rinnova accesso* quando il login scade o viene rifiutato, *Mostra* sui nuovi file arrivati da iCloud, *Apri cartella* sui conflitti.
+- Icona a nuvola sulla cartella sincronizzata in Dolphin.
+- File di controllo nascosto `.icloud-sync-check` al posto di `RCLONE_TEST`, convertito automaticamente alla prima sincronizzazione. Un altro PC rimasto alla 0.2 va aggiornato, altrimenti si blocca segnalando il file di controllo mancante.
+
+### Cambiato
+
 - Se il file di controllo `RCLONE_TEST` viene eliminato per sbaglio dalla cartella locale, viene ripristinato da iCloud invece di bloccare la sincronizzazione (solo se la cartella contiene ancora almeno metà dei file noti).
 - Un errore passeggero (per esempio una cartella eliminata mentre la sincronizzazione la stava leggendo) non genera più una notifica: viene riprovato in silenzio e segnalato solo se si ripete.
 - README in inglese come pagina di presentazione, con nota sull'uso quotidiano e sintesi del piano di sviluppo; la versione italiana è in `README.it.md`.

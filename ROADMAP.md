@@ -11,14 +11,21 @@ Questo è un piano, non una promessa: l'ordine riflette ciò che oggi pesa di pi
 
 ## 0.3 — Comodità d'uso
 
+Fatto nella versione di sviluppo:
+
+- finestra grafica per l'accesso Apple (provata contro un rclone simulato: la conferma vera arriverà al primo rinnovo);
+- vassoio con pausa/riprendi, elementi esclusi, registro attività e rinnovo dell'accesso;
+- notifiche con pulsanti («Rinnova accesso», «Mostra», «Apri cartella»);
+- file di controllo nascosto `.icloud-sync-check`, con conversione automatica di `RCLONE_TEST`;
+- icona a nuvola sulla cartella in Dolphin.
+
+Resta da fare:
+
 | Voce | Perché | Note |
 |---|---|---|
-| Finestra grafica per il login Apple | Il rinnovo ogni 30 giorni oggi richiede il terminale | Da costruire sul flusso `rclone config reconnect`; va provata con un login vero |
-| Vassoio: pausa/riprendi, elementi esclusi, log, rinnovo login | Completare ciò che oggi si fa solo da terminale | |
-| Notifiche con azione ("Rinnova login", "Mostra file") | Meno passaggi quando serve un intervento | |
-| Messaggi in inglese, italiano come traduzione | Il programma oggi parla solo italiano: limita chi può usarlo | gettext; README in inglese |
-| File di controllo nascosto al posto di `RCLONE_TEST` | Oggi è visibile e sembra un file inutile: è già stato eliminato per sbaglio riordinando | Va provato che iCloud accetti un nome che inizia con il punto |
-| Emblema e icona della cartella nel gestore file | Rende visibile che la cartella è sincronizzata | Dolphin e Nautilus |
+| Messaggi in inglese, italiano come traduzione | Il programma oggi parla solo italiano: limita chi può usarlo | È un passaggio meccanico ma tocca quasi ogni riga con un testo; README già in inglese |
+| Icona della cartella anche in Nautilus (GNOME) | Oggi solo Dolphin | Va provato su un desktop GNOME |
+| Emblemi di stato sui singoli file | Vedere a colpo d'occhio cosa è sincronizzato | Richiede un plugin compilato per ogni gestore file |
 
 ## 0.4 — Velocità dal lato iCloud
 

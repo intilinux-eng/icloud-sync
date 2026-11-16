@@ -267,6 +267,29 @@ class DaemonTests(SyncTestCase):
             time.sleep(0.2)
         return False
 
+    def test_paused_daemon_waits_and_catches_up_on_resume(self):
+        (self.cloud / "start.txt").write_text("1")
+        daemon = subprocess.Popen([sys.executable, str(SCRIPT), "watch"], env=self.env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            self.assertTrue(self.wait_for((self.pc / "start.txt").exists), "initial sync")
+            self.assertEqual(self.ics("pause").returncode, 0)
+            time.sleep(1.5)
+            (self.pc / "while-paused.txt").write_text("1")
+            (self.cloud / "remote-while-paused.txt").write_text("1")
+            time.sleep(6)
+            self.assertFalse((self.cloud / "while-paused.txt").exists(), "nothing is uploaded while paused")
+            self.assertFalse((self.pc / "remote-while-paused.txt").exists(), "nothing is downloaded while paused")
+            self.assertIn("PAUSA", self.ics("status").stdout)
+            self.assertEqual(self.ics("resume").returncode, 0)
+            self.assertTrue(self.wait_for((self.cloud / "while-paused.txt").exists), "upload after resume")
+            self.assertTrue(self.wait_for((self.pc / "remote-while-paused.txt").exists), "download after resume")
+        finally:
+            daemon.send_signal(signal.SIGTERM)
+            out, _ = daemon.communicate(timeout=120)
+        self.assertIn("In pausa", out)
+        self.assertIn("Ripresa", out)
+
     def test_daemon_reacts_to_both_sides_and_stops_cleanly(self):
         (self.cloud / "start.txt").write_text("1")
         daemon = subprocess.Popen([sys.executable, str(SCRIPT), "watch"], env=self.env,

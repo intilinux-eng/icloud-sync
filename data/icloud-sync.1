@@ -27,8 +27,13 @@ Synchronize now.
 .BR resync " [" \-\-prefer " newer|local|icloud]"
 Realign both sides from scratch; nothing is deleted.
 .TP
-.BR login " [" \-\-new\-password "] [" \-\-reset ]
+.BR login " [" \-\-gui "] [" \-\-new\-password "] [" \-\-reset ]
 Authenticate the Apple ID again (needed about every 30 days).
+.B \-\-gui
+opens a window instead of asking in the terminal.
+.TP
+.BR pause ", " resume
+Suspend and resume automatic synchronization.
 .TP
 .BR enable ", " disable ", " restart
 Manage the background service and the tray icon.

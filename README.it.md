@@ -76,13 +76,19 @@ Note sul login:
 
 - **Clic sull'icona** o *Apri cartella iCloud Drive*: apre la cartella nel gestore file.
 - **Sincronizza ora**: avvia subito un giro completo.
+- **Metti in pausa / Riprendi**: sospende la sincronizzazione automatica; alla ripresa recupera tutto.
+- **Elementi esclusi** e **Registro attività**: ciò che non si è potuto sincronizzare e le ultime operazioni.
+- **Rinnova accesso Apple**: apre una finestra per password e codice a due fattori, senza terminale, e mostra i giorni rimasti.
+
+Le notifiche hanno pulsanti: *Mostra* su un file appena arrivato, *Rinnova accesso* quando Apple lo richiede.
 
 ## Uso da terminale
 
 ```text
 icloud-sync status          stato, ultima sync, giorni rimasti al login
 icloud-sync sync            sincronizza subito (--dry-run per l'anteprima)
-icloud-sync login           rinnova il login Apple (circa ogni 30 giorni)
+icloud-sync login           rinnova il login Apple (circa ogni 30 giorni; --gui apre una finestra)
+icloud-sync pause|resume    sospende e riprende la sincronizzazione automatica
 icloud-sync log             ultime operazioni (--error: log rclone dell'ultimo errore)
 icloud-sync doctor          diagnostica completa
 icloud-sync skipped         elementi che iCloud non lascia scaricare (--retry per riprovarli)
@@ -116,7 +122,7 @@ Configurazione in `~/.config/icloud-sync/config.toml` (commentata): cartella, in
 
 Le priorità seguono l'uso quotidiano: è un piano, non una promessa.
 
-- **0.3, comodità d'uso.** Finestra grafica per il login Apple; più azioni nel vassoio (pausa, elementi esclusi, log); messaggi in inglese, con l'italiano come traduzione.
+- **0.3, comodità d'uso.** Già nella versione di sviluppo: finestra di accesso, pausa, registro ed elementi esclusi nel vassoio, notifiche con pulsanti, file di controllo nascosto. Resta da fare: messaggi in inglese, con l'italiano come traduzione.
 - **0.4, lato iCloud più veloce.** Un rclone sempre acceso, che vale 6–7 secondi sulla corsia veloce; eliminazioni e modifiche nella corsia veloce; rinomine rilevate prima.
 - **0.5, distribuzione.** Repository APT firmato, per aggiornare con `apt upgrade`; pacchetti RPM e AUR; icona nel vassoio anche con PySide6 (LGPL).
 - **0.6, funzioni.** Cestino locale per i file eliminati o sovrascritti da iCloud; sincronizzazione selettiva; più account.

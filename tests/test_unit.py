@@ -133,10 +133,15 @@ class NotificationTests(unittest.TestCase):
 
     def setUp(self):
         self.sent = []
-        self.real_notify, ics.notify = ics.notify, lambda cfg, title, body, urgent=False: self.sent.append(title)
+        self.buttons = []
+        self.real_notify, ics.notify = ics.notify, self.fake_notify
         self.engine = ics.Engine.__new__(ics.Engine)
         self.engine.cfg, self.engine.new_skips = {}, 0
         self.state, self.prev = {}, "ok"
+
+    def fake_notify(self, cfg, title, body, urgent=False, actions=None):
+        self.sent.append(title)
+        self.buttons.append(actions)
 
     def tearDown(self):
         ics.notify = self.real_notify
@@ -159,8 +164,255 @@ class NotificationTests(unittest.TestCase):
 
     def test_problems_that_need_the_user_alert_immediately(self):
         self.assertEqual(self.run_sync("auth"), 1)
+        self.assertEqual(self.buttons[-1][0][1], "login", "the sign-in alert offers a button that opens the sign-in window")
         self.assertEqual(self.run_sync("auth"), 1)
         self.assertEqual(self.run_sync("ok"), 2)
+
+
+class NotificationButtonTests(unittest.TestCase):
+    """The helper process shows the notification, waits for a click and runs the matching action."""
+
+    def run_helper(self, fake_notify_send):
+        bindir = Path(tempfile.mkdtemp(prefix="ics-bin-"))
+        (bindir / "notify-send").write_text(fake_notify_send)
+        (bindir / "notify-send").chmod(0o755)
+        spec = {"cmd": [str(bindir / "notify-send"), "-a", "iCloud Drive"], "text": ["title", "body"],
+                "actions": [["Renew", "login", ""], ["Show", "show", "/tmp/x"]]}
+        done = []
+        real, ics.run_action = ics.run_action, lambda verb, arg: done.append((verb, arg))
+        try:
+            import argparse
+            import json
+            self.assertEqual(ics.cmd_notify_helper(None, argparse.Namespace(spec=json.dumps(spec))), 0)
+        finally:
+            ics.run_action = real
+        return done, bindir
+
+    def test_clicked_button_runs_its_action(self):
+        done, _ = self.run_helper('#!/bin/sh\necho "$@" > "$(dirname "$0")/args"\necho 1\n')
+        self.assertEqual(done, [("show", "/tmp/x")])
+
+    def test_buttons_are_passed_to_notify_send(self):
+        _, bindir = self.run_helper('#!/bin/sh\necho "$@" > "$(dirname "$0")/args"\n')
+        self.assertIn("--action=0=Renew --action=1=Show title body", (bindir / "args").read_text())
+
+    def test_dismissed_notification_runs_nothing(self):
+        done, _ = self.run_helper("#!/bin/sh\nexit 0\n")
+        self.assertEqual(done, [])
+
+    def test_old_notify_send_still_shows_the_message(self):
+        done, bindir = self.run_helper('#!/bin/sh\ncase "$*" in *--action*) exit 1;; esac\necho "$@" > "$(dirname "$0")/args"\n')
+        self.assertEqual(done, [])
+        self.assertIn("title body", (bindir / "args").read_text())
+
+
+class FolderIconTests(unittest.TestCase):
+    def test_marker_is_written_and_removed_only_if_ours(self):
+        folder = Path(tempfile.mkdtemp(prefix="ics-icon-"))
+        ics.mark_folder(folder, True)
+        self.assertIn("Icon=folder-cloud", (folder / ".directory").read_text())
+        ics.mark_folder(folder, False)
+        self.assertFalse((folder / ".directory").exists())
+        (folder / ".directory").write_text("[Desktop Entry]\nIcon=my-own-icon\n")
+        ics.mark_folder(folder, True)
+        ics.mark_folder(folder, False)
+        self.assertIn("my-own-icon", (folder / ".directory").read_text(), "a user's own .directory is never touched")
+
+    def test_marker_is_never_synced(self):
+        self.assertTrue(ics.exclude_matcher(ics.DEFAULTS["exclude"])(".directory"))
+
+
+class ConfigProtocolTests(unittest.TestCase):
+    """rclone's non-interactive configuration replies, as observed with rclone 1.76."""
+
+    def test_question(self):
+        reply = ('{"State": "2fa_do", "Option": {"Name": "config_2fa", "Help": "Two-factor code", '
+                 '"IsPassword": false}, "Error": "", "Result": ""}')
+        question, problem = ics.parse_config_reply(0, reply, "")
+        self.assertEqual((question["state"], question["name"], question["secret"], problem), ("2fa_do", "config_2fa", False, ""))
+
+    def test_finished(self):
+        self.assertEqual(ics.parse_config_reply(0, '{"State": "", "Option": null, "Error": "", "Result": ""}', ""), (None, ""))
+
+    def test_fatal_error_is_reported_without_log_noise(self):
+        question, problem = ics.parse_config_reply(2, "", '2026/11/16 23:10:54 NOTICE: Fatal error: unknown state "x"\n')
+        self.assertIsNone(question)
+        self.assertEqual(problem, 'unknown state "x"')
+
+    def test_days_left(self):
+        self.assertIsNone(ics.login_days_left({}))
+        self.assertEqual(ics.login_days_left({"last_login": time.time() - 5 * 86400}), 24)
+
+
+FAKE_RCLONE = """#!/bin/sh
+# Stands in for rclone + Apple: code 123456 is right, "sms" asks again, anything else is wrong.
+echo "$@" >> "$FAKE_RCLONE_LOG"
+case "$1 $2" in
+  "obscure -") cat > /dev/null; echo OBSCURED-PASSWORD ;;
+  "config file") echo "Configuration file is stored at:"; echo "$RCLONE_CONFIG" ;;
+  "config update")
+    state=; result=; prev=
+    for a in "$@"; do
+      [ "$prev" = --state ] && state=$a
+      [ "$prev" = --result ] && result=$a
+      prev=$a
+    done
+    if [ -z "$state" ] || [ "$result" = sms ]; then
+      echo '{"State": "2fa_do", "Option": {"Name": "config_2fa", "Help": "Two-factor authentication", "IsPassword": false}, "Error": "", "Result": ""}'
+    elif [ "$result" = 123456 ]; then
+      echo '{"State": "", "Option": null, "Error": "", "Result": ""}'
+    else
+      echo "2026/01/01 10:00:00 NOTICE: Fatal error: failed to validate 2FA code: incorrect code" >&2
+      exit 1
+    fi ;;
+  "lsf "*) echo Documents/; echo a.txt ;;
+esac
+"""
+
+
+class QtTestCase(unittest.TestCase):
+    def setUp(self):
+        try:
+            from PyQt6 import QtCore, QtGui, QtWidgets
+        except ImportError:
+            self.skipTest("PyQt6 not installed")
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        self.QtCore, self.QtGui, self.QtWidgets = QtCore, QtGui, QtWidgets
+        self.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(["test"])
+        ics.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        for f in (ics.STATE_FILE, ics.PID_FILE, ics.ACTIVITY_FILE, ics.PAUSE_FILE):
+            f.unlink(missing_ok=True)
+
+    def wait_for(self, condition, what, timeout=15):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.app.processEvents()
+            if condition():
+                return
+            time.sleep(0.01)
+        self.fail(f"timed out waiting for: {what}")
+
+
+class LoginDialogTests(QtTestCase):
+    def setUp(self):
+        super().setUp()
+        self.tmp = Path(tempfile.mkdtemp(prefix="ics-login-"))
+        self.rclone = self.tmp / "rclone"
+        self.rclone.write_text(FAKE_RCLONE)
+        self.rclone.chmod(0o755)
+        os.environ["FAKE_RCLONE_LOG"] = str(self.tmp / "calls.log")
+        os.environ["RCLONE_CONFIG"] = str(self.tmp / "rclone.conf")
+        (self.tmp / "rclone.conf").write_text("[icloud]\ntype = iclouddrive\napple_id = me@example.com\npassword = OLD\n")
+        self.cfg = dict(ics.DEFAULTS, remote="icloud:")
+
+    def dialog(self, ask_credentials=False):
+        dlg = ics.login_dialog(self.QtCore, self.QtWidgets, self.cfg, str(self.rclone), ask_credentials)
+        self.addCleanup(dlg.reject)
+        if not ask_credentials:
+            self.assertEqual(dlg.st["step"], "confirm")
+            self.assertFalse((self.tmp / "calls.log").exists(), "Apple must not be contacted before the user confirms")
+            dlg.widgets["go"].click()
+        return dlg
+
+    def step(self, dlg, name):
+        self.wait_for(lambda: dlg.st["step"] == name, f"step {name!r} (now {dlg.st['step']!r})")
+
+    def test_renewal_with_the_right_code(self):
+        dlg = self.dialog()
+        self.step(dlg, "question")
+        self.assertIn("6 cifre", dlg.widgets["info"].text())
+        dlg.widgets["answer"].setText(" 123456 ")
+        dlg.widgets["go"].click()
+        self.step(dlg, "done")
+        self.assertTrue(dlg.st["ok"])
+        self.assertAlmostEqual(ics.load_state()["last_login"], time.time(), delta=30)
+        calls = (self.tmp / "calls.log").read_text()
+        self.assertIn("--continue --state 2fa_do --result 123456", calls)
+        self.assertIn("lsf icloud:", calls)
+
+    def test_wrong_code_can_be_retried(self):
+        dlg = self.dialog()
+        self.step(dlg, "question")
+        dlg.widgets["answer"].setText("000000")
+        dlg.widgets["go"].click()
+        self.step(dlg, "failed")
+        self.assertIn("incorrect code", dlg.widgets["error"].text())
+        self.assertFalse(dlg.st["ok"])
+        dlg.widgets["go"].click()  # "Riprova": Apple sends a new code
+        self.step(dlg, "question")
+        dlg.widgets["answer"].setText("123456")
+        dlg.widgets["go"].click()
+        self.step(dlg, "done")
+
+    def test_sms_request_asks_for_the_code_again(self):
+        dlg = self.dialog()
+        self.step(dlg, "question")
+        dlg.widgets["answer"].setText("sms")
+        dlg.widgets["go"].click()
+        self.wait_for(lambda: "--result sms" in (self.tmp / "calls.log").read_text() and dlg.st["step"] == "question",
+                      "second question after sms")
+        dlg.widgets["answer"].setText("123456")
+        dlg.widgets["go"].click()
+        self.step(dlg, "done")
+
+    def test_first_login_stores_obscured_credentials_never_on_a_command_line(self):
+        dlg = self.dialog(ask_credentials=True)
+        self.assertEqual(dlg.st["step"], "credentials")
+        dlg.widgets["go"].click()
+        self.assertIn("Apple ID", dlg.widgets["error"].text())
+        dlg.widgets["apple_id"].setText("new@example.com")
+        dlg.widgets["password"].setText("s3cret-pass")
+        dlg.widgets["go"].click()
+        self.step(dlg, "question")
+        conf = (self.tmp / "rclone.conf").read_text()
+        self.assertIn("apple_id = new@example.com", conf)
+        self.assertIn("password = OBSCURED-PASSWORD", conf)
+        self.assertNotIn("s3cret-pass", conf)
+        self.assertNotIn("s3cret-pass", (self.tmp / "calls.log").read_text())
+        self.assertEqual(dlg.widgets["password"].text(), "")
+
+    def test_missing_rclone_is_reported(self):
+        dlg = ics.login_dialog(self.QtCore, self.QtWidgets, self.cfg, str(self.tmp / "no-such-rclone"), False)
+        self.addCleanup(dlg.reject)
+        dlg.widgets["go"].click()
+        self.step(dlg, "failed")
+
+
+class TrayMenuTests(QtTestCase):
+    def setUp(self):
+        super().setUp()
+        self.menu, self.refresh, _open = ics.build_tray_menu(self.QtCore, self.QtGui, self.QtWidgets,
+                                                             dict(ics.DEFAULTS), lambda: None)
+
+    def test_pause_entry_toggles_the_pause_flag(self):
+        self.refresh()
+        self.assertEqual(self.menu.items["pause"].text(), "Metti in pausa")
+        self.menu.items["pause"].trigger()
+        self.assertTrue(ics.PAUSE_FILE.exists())
+        self.assertIn("Riprendi", self.menu.items["pause"].text())
+        self.assertFalse(self.menu.items["sync"].isEnabled())
+        self.menu.items["pause"].trigger()
+        self.assertFalse(ics.PAUSE_FILE.exists())
+
+    def test_entries_follow_the_state(self):
+        ics.save_state({"status": "ok", "last_success": time.time()})
+        self.refresh()
+        self.assertFalse(self.menu.items["skipped"].isVisible())
+        self.assertEqual(self.menu.items["login"].text(), "Rinnova accesso Apple…")
+        ics.save_state({"status": "ok", "skipped": {"Shared/": "x", "a.key": "y"}, "last_login": time.time() - 86400 * 3})
+        self.refresh()
+        self.assertIn("(2)", self.menu.items["skipped"].text())
+        self.assertIn("26 giorni", self.menu.items["login"].text())
+
+    def test_windows_show_log_and_skipped_items(self):
+        ics.LOG_FILE.write_text("2026-11-16 10:00:00 OK in 3s: 1 copiati\n")
+        win = ics.text_window(self.QtWidgets, "log", lambda: ics.log_text(300))
+        self.addCleanup(win.close)
+        self.assertIn("1 copiati", win.findChild(self.QtWidgets.QPlainTextEdit).toPlainText())
+        ics.save_state({"skipped": {"Shared/": "cartella condivisa"}})
+        self.assertIn("Shared/", ics.skipped_text())
+        self.assertEqual(ics.retry_skipped(), 1)
+        self.assertEqual(ics.load_state()["skipped"], {})
 
 
 class PackagingTests(unittest.TestCase):
@@ -177,6 +429,17 @@ class TrayTests(unittest.TestCase):
         ics.STATE_DIR.mkdir(parents=True, exist_ok=True)
         for f in (ics.STATE_FILE, ics.PID_FILE, ics.ACTIVITY_FILE):
             f.unlink(missing_ok=True)
+
+    def test_paused_daemon_is_shown_as_paused(self):
+        ics.PID_FILE.write_text(str(os.getpid()))
+        saved, ics.APP = ics.APP, "python"
+        try:
+            ics.save_state({"status": "ok", "last_success": time.time()})
+            ics.PAUSE_FILE.touch()
+            self.assertEqual(ics.tray_state()[:2], ("stopped", "In pausa"))
+        finally:
+            ics.APP = saved
+            ics.PAUSE_FILE.unlink(missing_ok=True)
 
     def test_state_without_daemon_is_stopped(self):
         ics.save_state({"status": "ok", "last_success": time.time()})

@@ -60,6 +60,9 @@ LOCK_FILE = STATE_DIR / "lock"
 PID_FILE = STATE_DIR / "daemon.pid"
 ACTIVITY_FILE = STATE_DIR / "activity"   # contiene il PID di chi sta sincronizzando in questo momento
 TRAY_LOCK = STATE_DIR / "tray.pid"
+PAUSE_FILE = STATE_DIR / "paused"        # finché esiste il demone non sincronizza (sopravvive al riavvio)
+NOTIFY_WAIT = 3600                       # secondi in cui i pulsanti di una notifica restano attivi
+DIRECTORY_FILE = "[Desktop Entry]\nIcon=folder-cloud\n"   # icona della cartella in Dolphin
 BIN_DIR = HOME / ".local/bin"
 UNIT_NAME = "icloud-sync.service"
 UNIT_PATH = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "systemd/user" / UNIT_NAME
@@ -229,17 +232,61 @@ def confirm(prompt: str, default: bool = True) -> bool:
     return default if not ans else ans[0] in "sy"
 
 
-def notify(cfg: dict, title: str, body: str, urgent: bool = False) -> None:
+def notify(cfg: dict, title: str, body: str, urgent: bool = False,
+           actions: list[tuple[str, str, str]] | None = None) -> None:
+    """Notifica desktop. actions = [(etichetta del pulsante, verbo, argomento)], vedi run_action()."""
     if not cfg.get("notifications") or not shutil.which("notify-send"):
         return
+    cmd = ["notify-send", "-a", "iCloud Drive", "-i", "folder-cloud", "-u", "critical" if urgent else "normal"]
     try:
-        subprocess.run(
-            ["notify-send", "-a", "iCloud Drive", "-i", "folder-cloud",
-             "-u", "critical" if urgent else "normal", title, body],
-            timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        if actions:
+            # Un pulsante richiede che qualcuno aspetti la risposta: lo fa un processo a parte, mai il demone.
+            spec = json.dumps({"cmd": cmd, "text": [title, body], "actions": actions})
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_notify", spec],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        else:
+            subprocess.run(cmd + [title, body], timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         pass
+
+
+def run_action(verb: str, arg: str) -> None:
+    """Azioni dei pulsanti delle notifiche: login | show FILE | open CARTELLA."""
+    quiet = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    if verb == "login":
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "login", "--gui"], **quiet)
+    elif verb == "show" and shutil.which("gdbus") and Path(arg).exists():
+        # Apre il gestore file con il file già selezionato (interfaccia standard org.freedesktop.FileManager1)
+        rc = subprocess.run(["gdbus", "call", "--session", "--dest", "org.freedesktop.FileManager1",
+                             "--object-path", "/org/freedesktop/FileManager1",
+                             "--method", "org.freedesktop.FileManager1.ShowItems", f"['{Path(arg).as_uri()}']", ""],
+                            capture_output=True, timeout=15).returncode
+        if rc != 0:
+            run_action("open", str(Path(arg).parent))
+    elif verb in ("show", "open"):
+        target = Path(arg) if verb == "open" else Path(arg).parent
+        subprocess.Popen(["xdg-open", str(target)], **quiet)
+
+
+def cmd_notify_helper(_cfg, args) -> int:
+    """Mostra una notifica con pulsanti, aspetta la scelta ed esegue l'azione (comando interno)."""
+    spec = json.loads(args.spec)
+    buttons = [f"--action={i}={label}" for i, (label, _verb, _arg) in enumerate(spec["actions"])]
+    try:
+        p = subprocess.run(spec["cmd"] + buttons + spec["text"], capture_output=True, text=True, timeout=NOTIFY_WAIT)
+    except subprocess.TimeoutExpired:
+        return 0
+    except OSError:
+        return 1
+    if p.returncode != 0:  # notify-send troppo vecchio per i pulsanti: almeno mostra il messaggio
+        subprocess.run(spec["cmd"] + spec["text"], capture_output=True, timeout=5)
+        return 0
+    choice = p.stdout.strip()
+    if choice.isdigit() and int(choice) < len(spec["actions"]):
+        _label, verb, arg = spec["actions"][int(choice)]
+        run_action(verb, arg)
+    return 0
 
 
 # ---------------------------------------------------------------- configurazione
@@ -924,14 +971,16 @@ class Engine:
             if res.counts.get("conflicts"):
                 notify(self.cfg, "iCloud Drive: conflitto",
                        f"{res.counts['conflicts']} file modificati su entrambi i lati. "
-                       "Entrambe le versioni sono state conservate (cerca «.conflict»).")
+                       "Entrambe le versioni sono state conservate (cerca «.conflict»).",
+                       actions=[("Apri cartella", "open", str(self.local))])
         elif res.status not in ("offline", "busy"):
             st["error_streak"] = st.get("error_streak", 0) + 1 if res.status == "error" else 0
             persistent = res.status != "error" or st["error_streak"] >= 2
             if persistent and (res.status != prev or not st.get("alerted")):
                 st["alerted"] = True
                 notify(self.cfg, f"iCloud Drive: {STATUS_TEXT[res.status].lstrip('✗ ')}",
-                       f"{res.message}\n{STATUS_HINT.get(res.status, '')}", urgent=True)
+                       f"{res.message}\n{STATUS_HINT.get(res.status, '')}", urgent=True,
+                       actions=[("Rinnova accesso", "login", "")] if res.status == "auth" else None)
 
 
 class RcloneFailure(Exception):
@@ -1080,7 +1129,21 @@ def cmd_watch(cfg: dict, _args) -> int:
     idle_hits = 0     # sync consecutive chieste dal controllo leggero ma rivelatesi vuote
     first_evt = last_evt = None
     failures = 0
+    paused = False
     while not flags["stop"]:
+        if PAUSE_FILE.exists():
+            if not paused:
+                paused = True
+                log("In pausa")
+            select.select([rfd], [], [], 5)
+            with contextlib.suppress(BlockingIOError):
+                os.read(rfd, 4096)
+            flags["now"] = False
+            continue
+        if paused:
+            paused = False
+            log("Ripresa")
+            flags["now"] = True  # recupera subito ciò che è cambiato durante la pausa
         now = time.monotonic()
         evt_due = min(last_evt + cfg["debounce"], first_evt + cfg["max_wait"]) if first_evt is not None else INF
         sync_due = max(not_before, min(next_poll, evt_due))
@@ -1115,7 +1178,7 @@ def cmd_watch(cfg: dict, _args) -> int:
                 names = ", ".join(os.path.basename(f) for f in pulled[:3]) + (f" e altri {len(pulled) - 3}" if len(pulled) > 3 else "")
                 log(f"Da iCloud: {len(pulled)} nuovi file ({names})")
                 if cfg["notify_downloads"]:
-                    notify(cfg, "Nuovo da iCloud Drive", names)
+                    notify(cfg, "Nuovo da iCloud Drive", names, actions=[("Mostra", "show", str(eng.local / pulled[0]))])
                 if watcher:
                     watcher.poll()  # gli eventi dei file appena scaricati non richiedono un altro giro
         else:
@@ -1166,7 +1229,8 @@ def login_reminder(cfg: dict) -> None:
         st["last_reminder"] = today
         save_state(st)
         notify(cfg, "iCloud Drive: login in scadenza",
-               f"Il login Apple scade tra circa {max(0, int(left))} giorni.\nRinnovalo con:  {APP} login")
+               f"Il login Apple scade tra circa {max(0, int(left))} giorni.\nRinnovalo con:  {APP} login",
+               actions=[("Rinnova accesso", "login", "")])
 
 
 def pid_of(pidfile: Path) -> int | None:
@@ -1226,6 +1290,33 @@ def cmd_resync(cfg: dict, args) -> int:
     return finish_dry_run(res) if args.dry_run else finish(res)
 
 
+def store_credentials(rclone: str, name: str, apple_id: str | None, password: str | None, reset: bool = False) -> None:
+    """Scrive Apple ID e password in rclone.conf. La password la offusca rclone leggendola da stdin:
+    non compare mai sulla riga di comando di un processo."""
+    values: dict[str, str | None] = {}
+    if reset:
+        values.update(cookies=None, trust_token=None)
+    if apple_id is not None:
+        p = subprocess.run([rclone, "obscure", "-"], input=password, capture_output=True, text=True)
+        if p.returncode != 0 or not p.stdout.strip():
+            raise RuntimeError(f"rclone obscure fallito: {p.stderr.strip()}")
+        values.update(type="iclouddrive", apple_id=apple_id, password=p.stdout.strip())
+    if values:
+        rclone_conf_set(rclone_conf_path(rclone), name, values)
+
+
+def login_done() -> None:
+    st = load_state()
+    st.update(last_login=time.time(), last_reminder=None)
+    save_state(st)
+    poke_daemon()
+
+
+def login_days_left(st: dict) -> int | None:
+    last = st.get("last_login")
+    return None if not last else int(TRUST_DAYS - (time.time() - last) / 86400)
+
+
 def cmd_login(cfg: dict, args) -> int:
     rclone = need_rclone(cfg)
     name = remote_name(cfg["remote"])
@@ -1233,24 +1324,19 @@ def cmd_login(cfg: dict, args) -> int:
         sys.exit(f"«{cfg['remote']}» non è un remote rclone: niente login da fare.")
     remotes = subprocess.run([rclone, "listremotes"], capture_output=True, text=True).stdout.split()
     exists = f"{name}:" in remotes
+    if getattr(args, "gui", False) and gui_available():
+        return login_gui(cfg, rclone, ask_credentials=not exists or args.new_password)
     if not exists or args.new_password or args.reset:
-        conf = rclone_conf_path(rclone)
-        values: dict[str, str | None] = {}
-        if args.reset:
-            values.update(cookies=None, trust_token=None)
+        apple_id = pw = None
         if not exists or args.new_password:
             apple_id = getattr(args, "apple_id", None) or ask("Apple ID (email)")
             say("Password dell'Apple ID (quella normale, non una «password per app»).")
             say("Viene salvata solo nella configurazione locale di rclone, offuscata.")
             pw = getpass.getpass("Password: ")
-            p = subprocess.run([rclone, "obscure", "-"], input=pw, capture_output=True, text=True)
-            if p.returncode != 0 or not p.stdout.strip():
-                sys.exit(f"rclone obscure fallito: {p.stderr.strip()}")
-            values.update(type="iclouddrive", apple_id=apple_id, password=p.stdout.strip())
         try:
-            rclone_conf_set(conf, name, values)
+            store_credentials(rclone, name, apple_id, pw, reset=args.reset)
         except RuntimeError as e:
-            sys.exit(f"Non posso scrivere {conf}: {e}.\nCrea il remote a mano con `rclone config` "
+            sys.exit(f"Non posso salvare le credenziali: {e}.\nCrea il remote a mano con `rclone config` "
                      f"(nome «{name}», tipo «iclouddrive») e rilancia.")
     say("\nOra Apple chiederà il codice di verifica a 2 fattori (arriva sui tuoi dispositivi Apple).")
     say("Con la Protezione avanzata dei dati attiva: abilita prima «Accedi ai dati iCloud sul web» su iPhone.\n")
@@ -1261,13 +1347,181 @@ def cmd_login(cfg: dict, args) -> int:
     if p.returncode != 0:
         say(f"\n✗ Login completato ma iCloud Drive non risponde: {last_error(p.stderr) or p.stderr.strip()[-300:]}")
         return 1
-    st = load_state()
-    st.update(last_login=time.time(), last_reminder=None)
-    save_state(st)
+    login_done()
     say(f"\n✓ Login riuscito: {len(p.stdout.splitlines())} elementi nella radice di iCloud Drive. "
         f"Valido circa {TRUST_DAYS} giorni.")
-    poke_daemon()
     return 0
+
+
+# ---------------------------------------------------------------- finestra di accesso Apple
+
+def gui_available() -> bool:
+    return has_tray_support() and any(os.environ.get(v) for v in ("WAYLAND_DISPLAY", "DISPLAY", "QT_QPA_PLATFORM"))
+
+
+def parse_config_reply(rc: int, stdout: str, stderr: str) -> tuple[dict | None, str]:
+    """Risposta di `rclone config update --non-interactive`: (prossima domanda, errore).
+    Nessuna domanda e nessun errore = configurazione completata."""
+    try:
+        reply = json.loads(stdout)
+    except ValueError:
+        lines = [l for l in (stderr + "\n" + stdout).splitlines() if l.strip()]
+        text = last_error(stderr) or (LOG_PREFIX_RE.sub("", lines[-1]) if lines else f"rclone è uscito con codice {rc}")
+        return None, re.sub(r"^(NOTICE: )?(Fatal error: )?", "", text)
+    option = reply.get("Option")
+    if not option:
+        return None, reply.get("Error") or ""
+    return {"state": reply.get("State", ""), "name": option.get("Name", ""), "help": option.get("Help", ""),
+            "secret": bool(option.get("IsPassword"))}, reply.get("Error") or ""
+
+
+def login_dialog(QtCore, QtWidgets, cfg: dict, rclone: str, ask_credentials: bool):
+    """Finestra di accesso Apple.
+
+    Guida `rclone config update NOME --non-interactive`: rclone restituisce ogni domanda (codice a due
+    fattori, scelta SMS, eventuali approvazioni) in JSON e riceve la risposta al giro successivo. La
+    finestra non conosce gli stati del backend iCloud: mostra la domanda che arriva, qualunque sia.
+    """
+    name = remote_name(cfg["remote"])
+    dlg = QtWidgets.QDialog()
+    dlg.setWindowTitle("Accesso Apple — iCloud Drive")
+    info, error = QtWidgets.QLabel(), QtWidgets.QLabel()
+    apple_id, password, answer = QtWidgets.QLineEdit(), QtWidgets.QLineEdit(), QtWidgets.QLineEdit()
+    apple_id.setPlaceholderText("Apple ID (email)")
+    password.setPlaceholderText("Password dell'Apple ID")
+    password.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+    error.setStyleSheet("color: #da4453;")
+    go, cancel = QtWidgets.QPushButton(), QtWidgets.QPushButton("Annulla")
+    go.setDefault(True)
+    layout = QtWidgets.QVBoxLayout(dlg)
+    layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetFixedSize)  # la finestra segue il contenuto
+    for w in (info, apple_id, password, answer, error):
+        if isinstance(w, QtWidgets.QLabel):
+            w.setWordWrap(True)
+            w.setFixedWidth(440)  # larghezza certa: il testo a capo calcola bene la propria altezza
+        layout.addWidget(w)
+    row = QtWidgets.QHBoxLayout()
+    row.addStretch(1)
+    row.addWidget(cancel)
+    row.addWidget(go)
+    layout.addLayout(row)
+
+    proc = QtCore.QProcess(dlg)
+    watchdog = QtCore.QTimer(dlg)
+    watchdog.setSingleShot(True)
+    watchdog.timeout.connect(proc.kill)
+    st = {"step": "", "question": None, "then": None, "ok": False}
+    first = ("Inserisci l'Apple ID e la sua password normale (non una «password per app»). "
+             "La password resta sul tuo PC, nella configurazione di rclone.\n\n"
+             "Con la Protezione avanzata dei dati attiva, abilita prima «Accedi ai dati iCloud sul web» su iPhone.")
+
+    def show(step: str, text: str, problem: str = "") -> None:
+        st["step"] = step
+        info.setText(text)
+        error.setText(problem)
+        error.setVisible(bool(problem))
+        apple_id.setVisible(step == "credentials")
+        password.setVisible(step == "credentials")
+        answer.setVisible(step == "question")
+        go.setEnabled(step not in ("working", "verify"))
+        go.setText({"credentials": "Accedi", "confirm": "Continua", "question": "Conferma", "failed": "Riprova",
+                    "done": "Chiudi"}.get(step, "Attendi…"))
+        cancel.setVisible(step != "done")
+        if step == "question":
+            answer.clear()
+            answer.setFocus()
+
+    def run(args: list[str], then) -> None:
+        st["then"] = then
+        proc.start(rclone, args)
+        watchdog.start(180_000)
+
+    def start_flow() -> None:
+        show("working", "Contatto Apple…")
+        run(["config", "update", name, "--non-interactive"], on_reply)
+
+    def on_reply(rc: int, out: str, err: str) -> None:
+        question, problem = parse_config_reply(rc, out, err)
+        if question:
+            st["question"] = question
+            answer.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password if question["secret"]
+                               else QtWidgets.QLineEdit.EchoMode.Normal)
+            text = ("Inserisci il codice a 6 cifre arrivato sui tuoi dispositivi Apple.\n"
+                    "Se non arriva, scrivi «sms» per riceverlo via messaggio."
+                    if question["name"] == "config_2fa" else question["help"])
+            show("question", text, problem)
+        elif problem:
+            show("failed", "Accesso non riuscito.", problem)
+        else:
+            show("verify", "Verifico l'accesso a iCloud Drive…")
+            run(["lsf", cfg["remote"], "--max-depth", "1"], on_verified)
+
+    def on_verified(rc: int, _out: str, err: str) -> None:
+        if rc != 0:
+            show("failed", "Accesso completato, ma iCloud Drive non risponde.", last_error(err) or err.strip()[-300:])
+            return
+        login_done()
+        st["ok"] = True
+        show("done", f"Accesso riuscito. Vale circa {TRUST_DAYS} giorni: ti avviso qualche giorno prima della scadenza.")
+
+    def on_finished(code: int, _status) -> None:
+        watchdog.stop()
+        out = bytes(proc.readAllStandardOutput()).decode(errors="replace")
+        err = bytes(proc.readAllStandardError()).decode(errors="replace")
+        st["then"](code, out, err)
+
+    def on_error(kind) -> None:
+        if kind == QtCore.QProcess.ProcessError.FailedToStart:
+            watchdog.stop()
+            show("failed", "Impossibile avviare rclone.", rclone)
+
+    def on_go() -> None:
+        step = st["step"]
+        if step == "done":
+            dlg.accept()
+        elif step == "credentials":
+            if not apple_id.text().strip() or not password.text():
+                show("credentials", first, "Inserisci Apple ID e password.")
+                return
+            try:
+                store_credentials(rclone, name, apple_id.text().strip(), password.text(), reset=True)
+            except (RuntimeError, OSError) as e:
+                show("credentials", first, str(e))
+                return
+            password.clear()
+            start_flow()
+        elif step == "question":
+            show("working", "Contatto Apple…")
+            run(["config", "update", name, "--non-interactive", "--continue",
+                 "--state", st["question"]["state"], "--result", answer.text().strip()], on_reply)
+        elif step == "confirm":
+            start_flow()
+        elif step == "failed":
+            show("credentials", first) if ask_credentials else start_flow()
+
+    proc.finished.connect(on_finished)
+    proc.errorOccurred.connect(on_error)
+    go.clicked.connect(on_go)
+    cancel.clicked.connect(dlg.reject)
+    dlg.finished.connect(lambda _code: proc.kill())
+    if ask_credentials:
+        show("credentials", first)
+    else:  # mai contattare Apple per un clic sbagliato: il rinnovo fa partire un nuovo codice
+        show("confirm", "Rinnovare ora l'accesso ad Apple?\n\nApple invierà un codice di verifica ai tuoi dispositivi: "
+                        "tienine uno a portata di mano.")
+    dlg.st, dlg.widgets = st, {"apple_id": apple_id, "password": password, "answer": answer, "go": go,
+                               "info": info, "error": error}
+    return dlg
+
+
+def login_gui(cfg: dict, rclone: str, ask_credentials: bool) -> int:
+    from PyQt6 import QtCore, QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([APP])
+    app.setApplicationDisplayName("iCloud Drive")
+    app.setDesktopFileName(APP)
+    dlg = login_dialog(QtCore, QtWidgets, cfg, rclone, ask_credentials)
+    dlg.exec()
+    return 0 if dlg.st["ok"] else 1
 
 
 def systemctl(*args: str, quiet: bool = False) -> subprocess.CompletedProcess:
@@ -1315,6 +1569,8 @@ def cmd_enable(cfg: dict, _args) -> int:
         return rc
     systemctl("restart", UNIT_NAME)
     say("✓ Servizio attivo: parte da solo a ogni accesso.")
+    PAUSE_FILE.unlink(missing_ok=True)
+    mark_folder(Path(os.path.expanduser(cfg["local"])).absolute(), True)
     if has_tray_support():
         AUTOSTART_PATH.parent.mkdir(parents=True, exist_ok=True)
         AUTOSTART_PATH.write_text(
@@ -1330,7 +1586,8 @@ def cmd_enable(cfg: dict, _args) -> int:
     return 0
 
 
-def cmd_disable(_cfg: dict, _args) -> int:
+def cmd_disable(cfg: dict, _args) -> int:
+    mark_folder(Path(os.path.expanduser(cfg["local"])).absolute(), False)
     systemctl("disable", "--now", UNIT_NAME)
     UNIT_PATH.unlink(missing_ok=True)
     systemctl("daemon-reload")
@@ -1340,6 +1597,31 @@ def cmd_disable(_cfg: dict, _args) -> int:
         with contextlib.suppress(OSError):
             os.kill(tray, signal.SIGTERM)
     say("Servizio e icona disattivati. Configurazione e file restano dove sono.")
+    return 0
+
+
+def mark_folder(local: Path, on: bool) -> None:
+    """Icona a nuvola sulla cartella sincronizzata in Dolphin, tramite il file .directory (che non viene sincronizzato)."""
+    marker = local / ".directory"
+    with contextlib.suppress(OSError):
+        if on and local.is_dir() and not marker.exists():
+            marker.write_text(DIRECTORY_FILE)
+        elif not on and marker.exists() and marker.read_text() == DIRECTORY_FILE:
+            marker.unlink()
+
+
+def cmd_pause(_cfg: dict, _args) -> int:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    PAUSE_FILE.touch()
+    poke_daemon()
+    say(f"Sincronizzazione in pausa. Per riprendere:  {APP} resume")
+    return 0
+
+
+def cmd_resume(_cfg: dict, _args) -> int:
+    PAUSE_FILE.unlink(missing_ok=True)
+    poke_daemon()
+    say("Sincronizzazione ripresa.")
     return 0
 
 
@@ -1360,6 +1642,8 @@ def tray_state() -> tuple[str, str, str]:
         return "sync", "Sincronizzazione in corso…", ""
     if pid_of(PID_FILE) is None:
         return "stopped", "Sincronizzazione automatica ferma", f"Avvia con:  {APP} enable"
+    if PAUSE_FILE.exists():
+        return "stopped", "In pausa", ""
     if status == "ok":
         return "ok", f"Sincronizzato {ago(st.get('last_success'))}", ""
     if status == "offline":
@@ -1419,6 +1703,100 @@ def tray_pixmap(QtCore, QtGui, kind: str, size: int = 64):
     return pm
 
 
+def text_window(QtWidgets, title: str, read_text, extra: tuple | None = None):
+    """Finestrella di sola lettura con «Aggiorna» e, se serve, un pulsante in più (etichetta, funzione)."""
+    win = QtWidgets.QDialog()
+    win.setWindowTitle(title)
+    win.resize(760, 420)
+    view = QtWidgets.QPlainTextEdit()
+    view.setReadOnly(True)
+
+    def load() -> None:
+        view.setPlainText(read_text())
+        view.verticalScrollBar().setValue(view.verticalScrollBar().maximum())
+
+    row = QtWidgets.QHBoxLayout()
+    row.addStretch(1)
+    for label, action in ([extra] if extra else []) + [("Aggiorna", lambda: None), ("Chiudi", win.close)]:
+        button = QtWidgets.QPushButton(label)
+        button.clicked.connect(lambda _checked=False, fn=action: (fn(), load()))
+        row.addWidget(button)
+    layout = QtWidgets.QVBoxLayout(win)
+    layout.addWidget(view)
+    layout.addLayout(row)
+    load()
+    win.show()
+    return win
+
+
+def build_tray_menu(QtCore, QtGui, QtWidgets, cfg: dict, on_quit):
+    """Menu dell'icona. Ritorna (menu, refresh, open_folder); refresh() riallinea le voci allo stato
+    attuale e ritorna (tipo, testo) per icona e suggerimento."""
+    local = Path(os.path.expanduser(cfg["local"])).absolute()
+    script = Path(__file__).resolve()
+    quiet = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    menu = QtWidgets.QMenu()
+    windows: list[object] = []  # tiene vive le finestre aperte
+
+    def item(label: str, icon: str, action):
+        entry = menu.addAction(QtGui.QIcon.fromTheme(icon), label)
+        entry.triggered.connect(lambda _checked=False: action())
+        return entry
+
+    def open_folder() -> None:
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(local)))
+
+    def sync_now() -> None:
+        if not poke_daemon():  # servizio fermo: una sincronizzazione singola
+            subprocess.Popen([sys.executable, str(script), "sync"], **quiet)
+
+    def toggle_pause() -> None:
+        if PAUSE_FILE.exists():
+            PAUSE_FILE.unlink(missing_ok=True)
+        else:
+            PAUSE_FILE.touch()
+        poke_daemon()
+        refresh()
+
+    status_item = menu.addAction("")
+    hint_item = menu.addAction("")
+    status_item.setEnabled(False)
+    hint_item.setEnabled(False)
+    menu.addSeparator()
+    item("Apri cartella iCloud Drive", "folder-open", open_folder)
+    sync_item = item("Sincronizza ora", "view-refresh", sync_now)
+    pause_item = item("", "media-playback-pause", toggle_pause)
+    menu.addSeparator()
+    skipped_item = item("", "dialog-warning", lambda: windows.append(text_window(
+        QtWidgets, "Elementi esclusi — iCloud Drive", skipped_text, ("Riprova tutti", retry_skipped))))
+    item("Registro attività…", "text-x-log", lambda: windows.append(text_window(
+        QtWidgets, "Registro attività — iCloud Drive", lambda: log_text(300))))
+    login_item = item("", "dialog-password", lambda: subprocess.Popen(
+        [sys.executable, str(script), "login", "--gui"], **quiet))
+    menu.addSeparator()
+    item("Chiudi icona", "application-exit", on_quit)
+
+    def refresh() -> tuple[str, str]:
+        kind, text, hint = tray_state()
+        st = load_state()
+        paused = PAUSE_FILE.exists()
+        status_item.setText(text)
+        hint_item.setText(hint)
+        hint_item.setVisible(bool(hint))
+        sync_item.setEnabled(kind != "sync" and not paused)
+        pause_item.setText("Riprendi la sincronizzazione" if paused else "Metti in pausa")
+        skipped_item.setText(f"Elementi esclusi ({len(st.get('skipped', {}))})…")
+        skipped_item.setVisible(bool(st.get("skipped")))
+        days = login_days_left(st)
+        login_item.setText("Rinnova accesso Apple…" if days is None
+                           else f"Rinnova accesso Apple… (restano {max(days, 0)} giorni)")
+        return kind, text
+
+    menu.items = {"status": status_item, "hint": hint_item, "sync": sync_item, "pause": pause_item,
+                  "skipped": skipped_item, "login": login_item}
+    return menu, refresh, open_folder
+
+
 def cmd_tray(cfg: dict, _args) -> int:
     try:
         from PyQt6 import QtCore, QtGui, QtWidgets
@@ -1441,56 +1819,28 @@ def cmd_tray(cfg: dict, _args) -> int:
     app.setApplicationDisplayName("iCloud Drive")
     app.setDesktopFileName(APP)
     app.setQuitOnLastWindowClosed(False)
-    local = Path(os.path.expanduser(cfg["local"])).absolute()
-    script = Path(__file__).resolve()
 
     tray = QtWidgets.QSystemTrayIcon()
-    menu = QtWidgets.QMenu()
-    status_item = menu.addAction("")
-    status_item.setEnabled(False)
-    hint_item = menu.addAction("")
-    hint_item.setEnabled(False)
-    menu.addSeparator()
-    open_item = menu.addAction(QtGui.QIcon.fromTheme("folder-open"), "Apri cartella iCloud Drive")
-    sync_item = menu.addAction(QtGui.QIcon.fromTheme("view-refresh"), "Sincronizza ora")
-    menu.addSeparator()
-    quit_item = menu.addAction(QtGui.QIcon.fromTheme("application-exit"), "Chiudi icona")
-
-    def open_folder() -> None:
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(local)))
-
-    def sync_now() -> None:
-        if not poke_daemon():  # servizio fermo: una sincronizzazione singola
-            subprocess.Popen([sys.executable, str(script), "sync"], stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    menu, menu_refresh, open_folder = build_tray_menu(QtCore, QtGui, QtWidgets, cfg, app.quit)
 
     def on_click(reason) -> None:
         if reason == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger:
             open_folder()
 
-    open_item.triggered.connect(open_folder)
-    sync_item.triggered.connect(sync_now)
-    quit_item.triggered.connect(app.quit)
     tray.activated.connect(on_click)
     tray.setContextMenu(menu)
-
     icons: dict[str, object] = {}
     shown: list[object] = [None]
 
     def refresh() -> None:
-        state = tray_state()
-        if state == shown[0]:
+        kind, text = menu_refresh()
+        if (kind, text) == shown[0]:
             return
-        shown[0] = state
-        kind, text, hint = state
+        shown[0] = (kind, text)
         if kind not in icons:
             icons[kind] = QtGui.QIcon(tray_pixmap(QtCore, QtGui, kind))
         tray.setIcon(icons[kind])
         tray.setToolTip(f"iCloud Drive — {text}")
-        status_item.setText(text)
-        hint_item.setText(hint)
-        hint_item.setVisible(bool(hint))
-        sync_item.setEnabled(kind != "sync")
 
     refresh()
     tray.show()
@@ -1533,39 +1883,51 @@ def cmd_status(cfg: dict, args) -> int:
         say(f"  Ultima ok:  {ago(st.get('last_success'))}")
     if st.get("skipped"):
         say(f"  Esclusi:    {len(st['skipped'])} elementi non scaricabili da iCloud → {APP} skipped")
-    say(f"  Servizio:   {service_state()}")
+    say(f"  Servizio:   {service_state()}" + (f" — IN PAUSA ({APP} resume)" if PAUSE_FILE.exists() else ""))
     if st.get("last_login"):
         left = TRUST_DAYS - (time.time() - st["last_login"]) / 86400
         say("  Login:      " + (f"valido ancora ~{int(left)} giorni" if left > 0 else f"probabilmente scaduto → {APP} login"))
     return 0 if status == "ok" else 1
 
 
-def cmd_skipped(_cfg: dict, args) -> int:
-    st = load_state()
-    skipped = st.get("skipped", {})
+def skipped_text() -> str:
+    skipped = load_state().get("skipped", {})
     if not skipped:
-        say("Nessun elemento escluso: tutto ciò che è in iCloud Drive viene sincronizzato.")
-        return 0
-    if args.retry:
+        return "Nessun elemento escluso: tutto ciò che è in iCloud Drive viene sincronizzato."
+    lines = ["Elementi che rclone non riesce a scaricare da iCloud e che quindi NON vengono sincronizzati:"]
+    lines += [f"  {path}\n      {why}" for path, why in sorted(skipped.items())]
+    return "\n".join(lines)
+
+
+def retry_skipped() -> int:
+    """Rimuove le esclusioni automatiche: verranno riprovate alla prossima sincronizzazione."""
+    st = load_state()
+    count = len(st.get("skipped", {}))
+    if count:
         st["skipped"] = {}
         save_state(st)
-        say(f"{len(skipped)} esclusioni rimosse: verranno riprovate alla prossima sincronizzazione.")
         poke_daemon()
+    return count
+
+
+def cmd_skipped(_cfg: dict, args) -> int:
+    if args.retry and load_state().get("skipped"):
+        say(f"{retry_skipped()} esclusioni rimosse: verranno riprovate alla prossima sincronizzazione.")
         return 0
-    say("Elementi che rclone non riesce a scaricare da iCloud e che quindi NON vengono sincronizzati:")
-    for path, why in sorted(skipped.items()):
-        say(f"  {path}\n      {why}")
-    say(f"\nPer riprovarli (es. dopo un aggiornamento di rclone):  {APP} skipped --retry")
+    say(skipped_text())
+    if load_state().get("skipped"):
+        say(f"\nPer riprovarli (es. dopo un aggiornamento di rclone):  {APP} skipped --retry")
     return 0
 
 
-def cmd_log(_cfg: dict, args) -> int:
-    path = ERR_LOG if args.error else LOG_FILE
+def log_text(lines: int, path: Path = LOG_FILE) -> str:
     if not path.exists():
-        say("Nessun log ancora.")
-        return 0
-    lines = path.read_text(errors="replace").splitlines()
-    say("\n".join(lines[-args.lines:]))
+        return "Nessun log ancora."
+    return "\n".join(path.read_text(errors="replace").splitlines()[-lines:])
+
+
+def cmd_log(_cfg: dict, args) -> int:
+    say(log_text(args.lines, ERR_LOG if args.error else LOG_FILE))
     return 0
 
 
@@ -1684,9 +2046,14 @@ def main() -> int:
     p = add("login", cmd_login, "(ri)autentica l'Apple ID: serve circa ogni 30 giorni")
     p.add_argument("--new-password", action="store_true", help="reinserisci Apple ID e password")
     p.add_argument("--reset", action="store_true", help="azzera cookie e token salvati prima di riprovare")
+    p.add_argument("--gui", action="store_true", help="usa una finestra invece del terminale")
     add("enable", cmd_enable, "avvia il servizio in background e l'icona nel vassoio, a ogni accesso")
     add("disable", cmd_disable, "ferma servizio e icona")
     add("restart", cmd_restart, "riavvia il servizio (dopo aver cambiato la configurazione)")
+    add("pause", cmd_pause, "sospende la sincronizzazione automatica finché non la riprendi")
+    add("resume", cmd_resume, "riprende la sincronizzazione automatica")
+    sub.add_parser("_notify").set_defaults(fn=cmd_notify_helper)  # interno: notifica con pulsanti
+    sub.choices["_notify"].add_argument("spec")
     add("watch", cmd_watch, "esegue il demone in primo piano (usato dal servizio)")
     add("tray", cmd_tray, "icona nel vassoio di sistema: stato, apri cartella, sincronizza ora")
     p = add("log", cmd_log, "mostra le ultime righe del log")
@@ -1701,7 +2068,7 @@ def main() -> int:
     if not args.cmd:
         ap.print_help()
         return 0
-    cfg = None if args.cmd in ("setup", "install-rclone") else load_config()
+    cfg = None if args.cmd in ("setup", "install-rclone", "_notify") else load_config()
     try:
         rc = args.fn(cfg, args)
     except KeyboardInterrupt:
