@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install rclone with the program's own installer
+        run: |
+          python icloud-sync install-rclone
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Lint
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq desktop-file-utils
+          python -m pip install --quiet pyflakes
+          make lint
+      - name: Unit and integration tests
+        run: make test
+
+  deb:
+    name: Debian package
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: make deb
+      - name: Lintian
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lintian
+          lintian --fail-on error dist/*.deb
+      - name: Install the package and smoke-test it
+        run: |
+          sudo apt-get install -y ./dist/*.deb
+          test "$(command -v icloud-sync)" = /usr/bin/icloud-sync
+          icloud-sync --version
+          man -w icloud-sync
+          systemd-analyze verify --user /usr/lib/systemd/user/icloud-sync.service
+          sudo apt-get remove -y icloud-sync
+      - uses: actions/upload-artifact@v4
+        with:
+          name: icloud-sync-deb
+          path: dist/
+          if-no-files-found: error

@@ -1,0 +1,38 @@
+name: Release
+
+# Pushing a tag like v0.2.0 builds the .deb and publishes a GitHub Release with it.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag must match the program version
+        run: |
+          version=$(python3 icloud-sync --version | awk '{print $2}')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match VERSION $version in icloud-sync"
+            exit 1
+          fi
+          grep -q "^## $version" CHANGELOG.md || { echo "::error::CHANGELOG.md has no entry for $version"; exit 1; }
+      - name: Tests
+        run: |
+          python3 icloud-sync install-rclone
+          export PATH="$HOME/.local/bin:$PATH"
+          make test
+      - name: Build the Debian package
+        run: make deb
+      - name: Release notes from the changelog
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          awk -v v="## $version" '$0 ~ "^## " { on = (index($0, v) == 1) } on' CHANGELOG.md | tail -n +2 > notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.deb dist/*.sha256 --title "icloud-sync ${GITHUB_REF_NAME#v}" --notes-file notes.md
