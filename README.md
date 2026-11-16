@@ -125,7 +125,7 @@ flowchart TB
 - iCloud provides no checksums: files are compared by size and modification time.
 - It is not an on-demand filesystem: every synced file takes disk space.
 - A hidden file named `.icloud-sync-check` lives in the Drive root. It is the check file; leave it there. If you delete it on the PC by mistake it is put back.
-- The program's messages are currently in **Italian**; English is on the [roadmap](ROADMAP.md).
+- The program speaks English and Italian, following the system language. Other languages need a translation of the catalog at the end of the program file.
 
 ## Commands
 
@@ -160,7 +160,7 @@ Choose icloud-sync if you want a full local copy that syncs both ways, a `.deb` 
 
 Priorities follow daily use, so this is a plan, not a promise.
 
-- **0.3, ease of use.** Done in the development version: sign-in window, pause, log and skipped items in the tray, notifications with buttons, hidden check file. Still to do: English messages, with Italian as a translation.
+- **0.3, ease of use.** Done: sign-in window, pause, log and skipped items in the tray, notifications with buttons, hidden check file, English messages with Italian as a translation.
 - **0.4, a faster iCloud side.** A persistent rclone process, worth 6–7 seconds on the fast lane; deletions and edits through the fast lane too; quicker detection of renames.
 - **0.5, distribution.** A signed APT repository so updates arrive with `apt upgrade`; RPM and AUR packages; the tray icon on PySide6 (LGPL) as an alternative to PyQt6.
 - **0.6, features.** A local trash for files deleted or overwritten from iCloud; selective sync; more than one account.

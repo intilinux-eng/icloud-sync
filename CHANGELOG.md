@@ -2,10 +2,11 @@
 
 Le versioni seguono [Semantic Versioning](https://semver.org/lang/it/). Finché siamo a 0.x, configurazione e comandi possono ancora cambiare.
 
-## Non ancora rilasciato
+## 0.3.0
 
 ### Aggiunto
 
+- Messaggi in inglese, con l'italiano come traduzione: la lingua segue quella del sistema (`LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG`). Un test garantisce che nessun messaggio resti senza traduzione.
 - Finestra grafica per l'accesso Apple (`icloud-sync login --gui`, o dal vassoio): Apple ID, password e codice a due fattori senza terminale. Provata contro un rclone simulato; non ancora contro un vero rinnovo con Apple.
 - Vassoio: *Metti in pausa / Riprendi*, *Elementi esclusi* con «Riprova tutti», *Registro attività*, *Rinnova accesso Apple* con i giorni rimasti.
 - Comandi `pause` e `resume`: la pausa sopravvive al riavvio e alla ripresa si recupera tutto ciò che è cambiato.

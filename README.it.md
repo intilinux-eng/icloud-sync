@@ -116,13 +116,13 @@ Configurazione in `~/.config/icloud-sync/config.toml` (commentata): cartella, in
 - iCloud non fornisce checksum: il confronto è su dimensione + data di modifica.
 - Non è un filesystem "on demand": tutti i file della cartella sincronizzata occupano spazio su disco.
 - Nella radice c'è un file nascosto `.icloud-sync-check`: è il file di controllo, non eliminarlo. Se lo cancelli per sbaglio dal PC viene rimesso.
-- I messaggi del programma sono per ora solo in italiano.
+- Il programma parla inglese e italiano, secondo la lingua del sistema.
 
 ## Piano di sviluppo
 
 Le priorità seguono l'uso quotidiano: è un piano, non una promessa.
 
-- **0.3, comodità d'uso.** Già nella versione di sviluppo: finestra di accesso, pausa, registro ed elementi esclusi nel vassoio, notifiche con pulsanti, file di controllo nascosto. Resta da fare: messaggi in inglese, con l'italiano come traduzione.
+- **0.3, comodità d'uso.** Fatto: finestra di accesso, pausa, registro ed elementi esclusi nel vassoio, notifiche con pulsanti, file di controllo nascosto, messaggi in inglese con l'italiano come traduzione.
 - **0.4, lato iCloud più veloce.** Un rclone sempre acceso, che vale 6–7 secondi sulla corsia veloce; eliminazioni e modifiche nella corsia veloce; rinomine rilevate prima.
 - **0.5, distribuzione.** Repository APT firmato, per aggiornare con `apt upgrade`; pacchetti RPM e AUR; icona nel vassoio anche con PySide6 (LGPL).
 - **0.6, funzioni.** Cestino locale per i file eliminati o sovrascritti da iCloud; sincronizzazione selettiva; più account.

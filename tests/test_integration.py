@@ -34,7 +34,7 @@ class SyncTestCase(unittest.TestCase):
         (self.tmp / "rclone.conf").touch()
         self.env = dict(os.environ, XDG_CONFIG_HOME=str(self.tmp / "config"), XDG_STATE_HOME=str(self.tmp / "state"),
                         XDG_CACHE_HOME=str(self.tmp / "cache"), RCLONE_CONFIG=str(self.tmp / "rclone.conf"),
-                        PYTHONDONTWRITEBYTECODE="1")
+                        PYTHONDONTWRITEBYTECODE="1", LANGUAGE="en")
         self.write_config()
 
     def write_config(self, **overrides):
@@ -74,6 +74,13 @@ class OneShotTests(SyncTestCase):
         self.assertTrue((self.pc / CHECK).exists() and (self.cloud / CHECK).exists())
         self.assertEqual(self.ics("status").returncode, 0)
 
+    def test_messages_follow_the_system_language(self):
+        self.env["LANGUAGE"] = "it_IT:en"
+        self.assertIn("mai sincronizzato", self.ics("status").stdout)
+        self.assertIn("sincronizzato", self.ics("sync").stdout)
+        self.env["LANGUAGE"] = "de"
+        self.assertIn("in sync", self.ics("status").stdout)
+
     def test_changes_travel_in_both_directions(self):
         (self.pc / "keep.txt").write_text("1")
         (self.pc / "gone.txt").write_text("1")
@@ -96,7 +103,7 @@ class OneShotTests(SyncTestCase):
         (self.cloud / "doc.txt").write_text("cloud version, newer")
         os.utime(self.cloud / "doc.txt", (now, now))
         out = self.sync().stdout
-        self.assertIn("conflitt", out)
+        self.assertIn("in conflict", out)
         self.assertEqual((self.pc / "doc.txt").read_text(), "cloud version, newer")
         losers = [p for p in self.pc.iterdir() if "conflict" in p.name]
         self.assertEqual([p.read_text() for p in losers], ["pc version"])
@@ -131,7 +138,7 @@ class OneShotTests(SyncTestCase):
             f.unlink()
         blocked = self.ics("sync")
         self.assertEqual(blocked.returncode, 1)
-        self.assertIn("vuoto", blocked.stdout)
+        self.assertIn("looks empty", blocked.stdout)
         self.assertTrue((self.pc / "a.txt").exists())
 
     def test_missing_check_file_blocks_the_sync(self):
@@ -252,7 +259,7 @@ exec "{RCLONE}" "$@"
         listed = self.ics("skipped").stdout
         self.assertIn("Shared/", listed)
         self.assertIn("Keynote/Deck.key", listed)
-        self.assertIn("2 elementi", self.ics("status").stdout)
+        self.assertIn("2 items", self.ics("status").stdout)
         (self.pc / "later.txt").write_text("1")
         self.sync()
         self.assertTrue((self.cloud / "later.txt").exists())
@@ -280,15 +287,15 @@ class DaemonTests(SyncTestCase):
             time.sleep(6)
             self.assertFalse((self.cloud / "while-paused.txt").exists(), "nothing is uploaded while paused")
             self.assertFalse((self.pc / "remote-while-paused.txt").exists(), "nothing is downloaded while paused")
-            self.assertIn("PAUSA", self.ics("status").stdout)
+            self.assertIn("PAUSED", self.ics("status").stdout)
             self.assertEqual(self.ics("resume").returncode, 0)
             self.assertTrue(self.wait_for((self.cloud / "while-paused.txt").exists), "upload after resume")
             self.assertTrue(self.wait_for((self.pc / "remote-while-paused.txt").exists), "download after resume")
         finally:
             daemon.send_signal(signal.SIGTERM)
             out, _ = daemon.communicate(timeout=120)
-        self.assertIn("In pausa", out)
-        self.assertIn("Ripresa", out)
+        self.assertIn("Paused", out)
+        self.assertIn("Resumed", out)
 
     def test_daemon_reacts_to_both_sides_and_stops_cleanly(self):
         (self.cloud / "start.txt").write_text("1")
@@ -308,7 +315,7 @@ class DaemonTests(SyncTestCase):
             daemon.send_signal(signal.SIGTERM)
             out, _ = daemon.communicate(timeout=120)
         self.assertEqual(daemon.returncode, 0, out)
-        self.assertIn("Arrestato", out)
+        self.assertIn("Stopped", out)
         self.assertFalse((self.tmp / "state" / "icloud-sync" / "activity").exists())
 
 

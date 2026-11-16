@@ -11,6 +11,7 @@ _SANDBOX = tempfile.mkdtemp(prefix="ics-unit-")
 os.environ["XDG_CONFIG_HOME"] = f"{_SANDBOX}/config"
 os.environ["XDG_STATE_HOME"] = f"{_SANDBOX}/state"
 os.environ["XDG_CACHE_HOME"] = f"{_SANDBOX}/cache"
+os.environ["LANGUAGE"] = "en"  # the tests assert on the English messages
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from support import ROOT, load_program  # noqa: E402
@@ -341,7 +342,7 @@ class LoginDialogTests(QtTestCase):
     def test_renewal_with_the_right_code(self):
         dlg = self.dialog()
         self.step(dlg, "question")
-        self.assertIn("6 cifre", dlg.widgets["info"].text())
+        self.assertIn("6-digit code", dlg.widgets["info"].text())
         dlg.widgets["answer"].setText(" 123456 ")
         dlg.widgets["go"].click()
         self.step(dlg, "done")
@@ -407,10 +408,10 @@ class TrayMenuTests(QtTestCase):
 
     def test_pause_entry_toggles_the_pause_flag(self):
         self.refresh()
-        self.assertEqual(self.menu.items["pause"].text(), "Metti in pausa")
+        self.assertEqual(self.menu.items["pause"].text(), "Pause")
         self.menu.items["pause"].trigger()
         self.assertTrue(ics.PAUSE_FILE.exists())
-        self.assertIn("Riprendi", self.menu.items["pause"].text())
+        self.assertIn("Resume", self.menu.items["pause"].text())
         self.assertFalse(self.menu.items["sync"].isEnabled())
         self.menu.items["pause"].trigger()
         self.assertFalse(ics.PAUSE_FILE.exists())
@@ -419,11 +420,11 @@ class TrayMenuTests(QtTestCase):
         ics.save_state({"status": "ok", "last_success": time.time()})
         self.refresh()
         self.assertFalse(self.menu.items["skipped"].isVisible())
-        self.assertEqual(self.menu.items["login"].text(), "Rinnova accesso Apple…")
+        self.assertEqual(self.menu.items["login"].text(), "Renew Apple sign-in…")
         ics.save_state({"status": "ok", "skipped": {"Shared/": "x", "a.key": "y"}, "last_login": time.time() - 86400 * 3})
         self.refresh()
         self.assertIn("(2)", self.menu.items["skipped"].text())
-        self.assertIn("26 giorni", self.menu.items["login"].text())
+        self.assertIn("26 days left", self.menu.items["login"].text())
 
     def test_windows_show_log_and_skipped_items(self):
         ics.LOG_FILE.write_text("2026-11-16 10:00:00 OK in 3s: 1 copiati\n")
@@ -434,6 +435,64 @@ class TrayMenuTests(QtTestCase):
         self.assertIn("Shared/", ics.skipped_text())
         self.assertEqual(ics.retry_skipped(), 1)
         self.assertEqual(ics.load_state()["skipped"], {})
+
+
+class TranslationTests(unittest.TestCase):
+    """English is the text in the code; Italian is the IT catalog. Nothing may fall between the two."""
+
+    def used_texts(self):
+        import ast
+        tree = ast.parse((ROOT / "icloud-sync").read_text())
+        return {node.args[0].value for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and getattr(node.func, "id", "") in ("_", "N_") and node.args
+                and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)}
+
+    def test_every_message_has_an_italian_translation(self):
+        self.assertEqual(sorted(self.used_texts() - set(ics.IT)), [])
+
+    def test_catalog_has_no_stale_entries(self):
+        self.assertEqual(sorted(set(ics.IT) - self.used_texts()), [])
+
+    def test_translations_keep_the_same_placeholders(self):
+        import string
+        def fields(text):
+            return sorted({f[1] for f in string.Formatter().parse(text) if f[1]})
+        for english, italian in ics.IT.items():
+            self.assertEqual(fields(english), fields(italian), english)
+
+    def test_only_known_calls_are_translated(self):
+        import ast
+        tree = ast.parse((ROOT / "icloud-sync").read_text())
+        dynamic = [node.lineno for node in ast.walk(tree)
+                   if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "N_"
+                   and not (node.args and isinstance(node.args[0], ast.Constant))]
+        self.assertEqual(dynamic, [], "N_() must wrap a literal")
+
+    def test_language_detection_follows_gettext_order(self):
+        saved = {v: os.environ.pop(v, None) for v in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG")}
+        try:
+            self.assertEqual(ics.detect_language(), "en")
+            os.environ["LANG"] = "it_IT.UTF-8"
+            self.assertEqual(ics.detect_language(), "it")
+            os.environ["LC_ALL"] = "C"
+            self.assertEqual(ics.detect_language(), "en")
+            os.environ["LANGUAGE"] = "it:en"
+            self.assertEqual(ics.detect_language(), "it")
+        finally:
+            for var, value in saved.items():
+                os.environ.pop(var, None)
+                if value is not None:
+                    os.environ[var] = value
+
+    def test_italian_is_used_when_asked(self):
+        saved, ics.LANGUAGE = ics.LANGUAGE, "it"
+        try:
+            self.assertEqual(ics._("Sync now"), "Sincronizza ora")
+            self.assertEqual(ics._(ics.STATUS_TEXT["ok"]), "✓ sincronizzato")
+            self.assertEqual(ics.summarize({"copied": 2, "deleted": 1}), "2 copiati, 1 eliminati")
+        finally:
+            ics.LANGUAGE = saved
+        self.assertEqual(ics.summarize({"copied": 2, "deleted": 1}), "2 copied, 1 deleted")
 
 
 class PackagingTests(unittest.TestCase):
@@ -457,7 +516,7 @@ class TrayTests(unittest.TestCase):
         try:
             ics.save_state({"status": "ok", "last_success": time.time()})
             ics.PAUSE_FILE.touch()
-            self.assertEqual(ics.tray_state()[:2], ("stopped", "In pausa"))
+            self.assertEqual(ics.tray_state()[:2], ("stopped", "Paused"))
         finally:
             ics.APP = saved
             ics.PAUSE_FILE.unlink(missing_ok=True)

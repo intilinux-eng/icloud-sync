@@ -2,30 +2,29 @@
 
 Questo è un piano, non una promessa: l'ordine riflette ciò che oggi pesa di più nell'uso quotidiano. Le misure citate vengono da prove su un iCloud Drive reale di circa 1200 file e 5 GB (novembre 2026, rclone 1.76).
 
-## Dove siamo (0.2.0)
+## Dove siamo (0.3.0)
 
 - Sincronizzazione a due vie affidabile, con protezioni contro le eliminazioni di massa e ripristino automatico.
 - PC → iCloud: circa 30 secondi. iCloud → PC: file nuovi in 20–30 secondi, eliminazioni e modifiche in 40–70 secondi, rinomine fino a 5 minuti.
 - Icona nel vassoio con stato, apertura cartella e sincronizzazione immediata.
 - Pacchetto `.deb` costruito e verificato in pipeline; test automatici su Python 3.11–3.14.
 
-## 0.3 — Comodità d'uso
+## 0.3 — Comodità d'uso (fatto)
 
-Fatto nella versione di sviluppo:
+- Finestra grafica per l'accesso Apple (provata contro un rclone simulato: la conferma vera arriverà al primo rinnovo).
+- Vassoio con pausa/riprendi, elementi esclusi, registro attività e rinnovo dell'accesso.
+- Notifiche con pulsanti («Rinnova accesso», «Mostra», «Apri cartella»).
+- File di controllo nascosto `.icloud-sync-check`, con conversione automatica di `RCLONE_TEST`.
+- Icona a nuvola sulla cartella in Dolphin.
+- Messaggi in inglese, con l'italiano come traduzione.
 
-- finestra grafica per l'accesso Apple (provata contro un rclone simulato: la conferma vera arriverà al primo rinnovo);
-- vassoio con pausa/riprendi, elementi esclusi, registro attività e rinnovo dell'accesso;
-- notifiche con pulsanti («Rinnova accesso», «Mostra», «Apri cartella»);
-- file di controllo nascosto `.icloud-sync-check`, con conversione automatica di `RCLONE_TEST`;
-- icona a nuvola sulla cartella in Dolphin.
-
-Resta da fare:
+Rimandato:
 
 | Voce | Perché | Note |
 |---|---|---|
-| Messaggi in inglese, italiano come traduzione | Il programma oggi parla solo italiano: limita chi può usarlo | È un passaggio meccanico ma tocca quasi ogni riga con un testo; README già in inglese |
-| Icona della cartella anche in Nautilus (GNOME) | Oggi solo Dolphin | Va provato su un desktop GNOME |
-| Emblemi di stato sui singoli file | Vedere a colpo d'occhio cosa è sincronizzato | Richiede un plugin compilato per ogni gestore file |
+| Emblemi di stato sui singoli file in Dolphin | Vedere a colpo d'occhio cosa è sincronizzato | Serve un plugin C++ (`KOverlayIconPlugin`), in un pacchetto a parte compilato per architettura |
+| Icona della cartella ed emblemi in Nautilus (GNOME) | Oggi solo Dolphin | Non serve nulla di compilato (`gio set` o un'estensione Python), ma va provato su un desktop GNOME |
+| Commenti e documentazione interna del codice in inglese | Oggi sono in italiano: frena chi vuole contribuire | Solo i messaggi all'utente sono stati tradotti |
 
 ## 0.4 — Velocità dal lato iCloud
 

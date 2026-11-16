@@ -42,10 +42,37 @@ from pathlib import Path
 try:
     import tomllib
 except ImportError:  # pragma: no cover
-    sys.exit("icloud-sync richiede Python 3.11 o successivo.")
+    sys.exit("icloud-sync requires Python 3.11 or later.")
+
+
+# ---------------------------------------------------------------- lingua
+
+def detect_language() -> str:
+    """Lingua dei messaggi: "it" se l'ambiente chiede l'italiano, altrimenti inglese.
+    Stesso ordine di gettext: LANGUAGE, LC_ALL, LC_MESSAGES, LANG."""
+    for var in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
+        value = os.environ.get(var, "")
+        if value:
+            return "it" if value.split(":")[0].lower().startswith("it") else "en"
+    return "en"
+
+
+LANGUAGE = detect_language()
+IT: dict[str, str] = {}  # inglese -> italiano; riempito in fondo al file
+
+
+def _(text: str) -> str:
+    """Traduce un messaggio. Il testo nel codice è l'inglese; i segnaposto {nome} restano gli stessi."""
+    return IT.get(text, text) if LANGUAGE == "it" else text
+
+
+def N_(text: str) -> str:
+    """Segna come traducibile un testo definito a livello di modulo: lo traduce _() al momento dell'uso."""
+    return text
+
 
 APP = "icloud-sync"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 HOME = Path.home()
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / APP
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state") / APP
@@ -92,8 +119,8 @@ WantedBy=default.target
 MIN_RCLONE = (1, 69)
 CHECK_FILE = ".icloud-sync-check"   # nascosto: quello visibile sembrava un file inutile e veniva eliminato
 OLD_CHECK_FILE = "RCLONE_TEST"      # nome usato fino alla 0.2, convertito automaticamente
-CHECK_TEXT = (f"File di controllo di {APP}: non eliminarlo.\n"
-              "Serve a verificare che entrambi i lati siano davvero raggiungibili prima di sincronizzare.\n")
+CHECK_TEXT = (f"Check file of {APP}: do not delete it.\n"   # finisce su iCloud: una sola lingua per tutti
+              "It lets the program verify that both sides are really reachable before syncing.\n")
 TRUST_DAYS = 30
 AUTO_RESYNC_COOLDOWN = 6 * 3600
 
@@ -124,25 +151,25 @@ DEFAULTS = {
 }
 
 CONFIG_HELP = {
-    "remote": "Remote rclone (ed eventuale sottocartella), es. \"icloud:\" o \"icloud:Documenti\"",
-    "local": "Cartella locale da tenere sincronizzata",
-    "remote_check_interval": "Controllo leggero di iCloud (una sola richiesta): ogni quanti secondi chiedere se è cambiato qualcosa.\n# Se sì, parte subito la sincronizzazione. 0 = disattivato",
-    "poll_interval": "Controllo completo di sicurezza: ogni quanti secondi sincronizzare comunque (coglie anche le rinomine)",
-    "debounce": "Secondi di quiete dopo una modifica locale prima di sincronizzare",
-    "max_wait": "Attesa massima (secondi) se le modifiche locali non si fermano mai",
-    "max_delete": "Blocca la sync se andrebbe eliminato più di questo % di file su un lato",
-    "max_delete_min_files": "…ma solo se i file da eliminare sono più di questo numero (eliminare 1 file su 3 è normale)",
-    "conflict_resolve": "File modificato su entrambi i lati: newer | older | larger | smaller | path1 | path2 | none\n# (il perdente non viene mai cancellato: viene rinominato in *.conflictN)",
-    "check_access": f"Richiede il file {CHECK_FILE} su entrambi i lati (protegge da elenchi vuoti/errati)",
-    "auto_resync": "Ripara da solo lo stato dopo un errore critico (non elimina mai file)",
-    "transfers": "Trasferimenti in parallelo",
-    "checkers": "Controlli in parallelo (alzare velocizza l'elenco di cartelle grandi)",
-    "notifications": "Notifiche desktop su errori, conflitti e scadenza login",
-    "notify_downloads": "Notifica anche quando arrivano nuovi file da iCloud",
-    "connectivity_host": "Host usato per capire se c'è rete (stringa vuota = non controllare)",
-    "rclone_path": "Percorso di rclone (vuoto = cerca nel PATH e in ~/.local/bin)",
-    "exclude": "File/cartelle da ignorare (glob sul nome; \"/\" finale = cartella)",
-    "extra_flags": "Flag aggiuntivi passati a rclone bisync, es. [\"--bwlimit\", \"2M\"]",
+    "remote": N_('rclone remote (and optional subfolder), e.g. "icloud:" or "icloud:Documents"'),
+    "local": N_('Local folder to keep in sync'),
+    "remote_check_interval": N_('Light check of iCloud (a single request): how often, in seconds, to ask whether anything changed.\n# If so, a sync starts right away. 0 = disabled'),
+    "poll_interval": N_('Full safety check: how often, in seconds, to sync anyway (this also catches renames)'),
+    "debounce": N_('Quiet seconds after a local change before syncing'),
+    "max_wait": N_('Longest wait (seconds) when local changes never stop'),
+    "max_delete": N_('Stop the sync if more than this % of the files on one side would be deleted'),
+    "max_delete_min_files": N_('…but only when more files than this would be deleted (deleting 1 file out of 3 is normal)'),
+    "conflict_resolve": N_('File changed on both sides: newer | older | larger | smaller | path1 | path2 | none\n# (the loser is never deleted: it is renamed to *.conflictN)'),
+    "check_access": N_('Require the file .icloud-sync-check on both sides (protects against empty or wrong listings)'),
+    "auto_resync": N_('Repair the sync state automatically after a critical error (never deletes files)'),
+    "transfers": N_('Parallel transfers'),
+    "checkers": N_('Parallel checkers (raising it speeds up the listing of large folders)'),
+    "notifications": N_('Desktop notifications for errors, conflicts and sign-in expiry'),
+    "notify_downloads": N_('Also notify when new files arrive from iCloud'),
+    "connectivity_host": N_('Host used to tell whether the network is up (empty string = do not check)'),
+    "rclone_path": N_('Path of rclone (empty = look in PATH and in ~/.local/bin)'),
+    "exclude": N_('Files and folders to ignore (glob on the name; a trailing "/" means folder)'),
+    "extra_flags": N_('Extra flags passed to rclone bisync, e.g. ["--bwlimit", "2M"]'),
 }
 
 AUTH_RE = re.compile(
@@ -211,15 +238,15 @@ def save_state(st: dict) -> None:
 
 def ago(ts: float | None) -> str:
     if not ts:
-        return "mai"
+        return _('never')
     d = max(0, time.time() - ts)
     if d < 90:
-        return f"{int(d)} s fa"
+        return _('{v1} s ago').format(v1=int(d))
     if d < 5400:
-        return f"{int(d / 60)} min fa"
+        return _('{v1} min ago').format(v1=int(d / 60))
     if d < 172800:
-        return f"{int(d / 3600)} h fa"
-    return f"{int(d / 86400)} giorni fa"
+        return _('{v1} h ago').format(v1=int(d / 3600))
+    return _('{v1} days ago').format(v1=int(d / 86400))
 
 
 def ask(prompt: str, default: str = "") -> str:
@@ -228,7 +255,7 @@ def ask(prompt: str, default: str = "") -> str:
 
 
 def confirm(prompt: str, default: bool = True) -> bool:
-    ans = input(f"{prompt} [{'S/n' if default else 's/N'}]: ").strip().lower()
+    ans = input(f"{prompt} [{_('Y/n') if default else _('y/N')}]: ").strip().lower()
     return default if not ans else ans[0] in "sy"
 
 
@@ -336,6 +363,8 @@ def cmd_notify_helper(_cfg, args) -> int:
         pass
     finally:
         monitor.kill()
+        monitor.wait()
+        monitor.stdout.close()
     return 0
 
 
@@ -347,23 +376,23 @@ def load_config(required: bool = True) -> dict:
         try:
             user = tomllib.loads(CONFIG_FILE.read_text())
         except tomllib.TOMLDecodeError as e:
-            sys.exit(f"Errore in {CONFIG_FILE}: {e}")
+            sys.exit(_('Error in {config_file}: {e}').format(config_file=CONFIG_FILE, e=e))
         for k, v in user.items():
             if k not in DEFAULTS:
-                say(f"attenzione: opzione sconosciuta «{k}» in {CONFIG_FILE}")
+                say(_('warning: unknown option "{k}" in {config_file}').format(k=k, config_file=CONFIG_FILE))
             elif type(v) is not type(DEFAULTS[k]):
-                sys.exit(f"Errore in {CONFIG_FILE}: «{k}» deve essere di tipo {type(DEFAULTS[k]).__name__}")
+                sys.exit(_('Error in {config_file}: "{k}" must be of type {v1}').format(config_file=CONFIG_FILE, k=k, v1=type(DEFAULTS[k]).__name__))
             else:
                 cfg[k] = v
     elif required:
-        sys.exit(f"Nessuna configurazione trovata. Esegui prima:  {APP} setup")
+        sys.exit(_('No configuration found. Run first:  {app} setup').format(app=APP))
     return cfg
 
 
 def write_config(cfg: dict) -> None:
-    out = [f"# Configurazione di {APP}. Dopo una modifica: {APP} restart", ""]
+    out = [_('# Configuration of {app}. After a change: {app} restart').format(app=APP), ""]
     for k in DEFAULTS:
-        out += [f"# {line}" if i == 0 else line for i, line in enumerate(CONFIG_HELP[k].split("\n"))]
+        out += [f"# {line}" if i == 0 else line for i, line in enumerate(_(CONFIG_HELP[k]).split("\n"))]
         v = cfg[k]
         if isinstance(v, bool):
             out.append(f"{k} = {'true' if v else 'false'}")
@@ -384,6 +413,8 @@ def exclude_matcher(patterns: list[str]):
 
 
 def filters_text(patterns: list[str], skipped: dict[str, str] | None = None) -> str:
+    # I due commenti restano in italiano in ogni lingua: bisync conserva l'impronta di questo file e
+    # pretende un riallineamento completo se cambia anche un solo byte.
     lines = [f"# generato da {APP} da config.toml: non modificare a mano"]
     for p in patterns:
         lines.append(f"- {p}**" if p.endswith("/") else f"- {p}")
@@ -399,10 +430,10 @@ def filters_text(patterns: list[str], skipped: dict[str, str] | None = None) -> 
 UNSYNCABLE = [
     # cartelle condivise: rclone le elenca ma non ottiene l'URL di download -> si esclude la cartella
     (re.compile(r"ERROR : (.+?): Failed to copy: failed to open source object: RootURL not set"), True,
-     "cartella condivisa: rclone non riesce a scaricarla"),
+     N_('shared folder: rclone cannot download it')),
     # documenti iWork (Keynote/Pages/Numbers): iCloud dichiara una dimensione diversa dal file servito
     (re.compile(r"ERROR : (.+?)\.[0-9a-f]{8}\.partial: corrupted on transfer: sizes differ"), False,
-     "dimensione incoerente su iCloud (tipico dei documenti iWork)"),
+     N_('inconsistent size on iCloud (typical of iWork documents)')),
 ]
 
 
@@ -435,11 +466,10 @@ def rclone_version(rclone: str) -> tuple[int, ...]:
 def need_rclone(cfg: dict) -> str:
     rclone = find_rclone(cfg)
     if not rclone:
-        sys.exit(f"rclone non trovato. Installa con:  {APP} install-rclone   (oppure: sudo apt install rclone)")
+        sys.exit(_('rclone not found. Install it with:  {app} install-rclone   (or: sudo apt install rclone)').format(app=APP))
     ver = rclone_version(rclone)
     if ver[:2] < MIN_RCLONE:
-        sys.exit(f"rclone {'.'.join(map(str, ver))} è troppo vecchio: serve >= 1.69 per iCloud Drive.\n"
-                 f"Aggiorna con:  {APP} install-rclone")
+        sys.exit(_('rclone {v1} is too old: iCloud Drive needs >= 1.69.\nUpdate it with:  {app} install-rclone').format(v1='.'.join(map(str, ver)), app=APP))
     return rclone
 
 
@@ -447,7 +477,7 @@ def install_rclone() -> str:
     """Scarica il binario ufficiale in ~/.local/bin verificandone lo SHA-256."""
     arch = {"x86_64": "amd64", "aarch64": "arm64", "armv7l": "arm-v7", "i686": "386"}.get(platform.machine())
     if not arch:
-        sys.exit(f"Architettura {platform.machine()} non gestita: installa rclone da https://rclone.org/downloads/")
+        sys.exit(_('Architecture {v1} is not handled: install rclone from https://rclone.org/downloads/').format(v1=platform.machine()))
 
     def fetch(url: str) -> bytes:
         # downloads.rclone.org rifiuta (403) lo User-Agent predefinito di urllib
@@ -458,13 +488,13 @@ def install_rclone() -> str:
     ver = fetch("https://downloads.rclone.org/version.txt").decode().split()[-1]
     name = f"rclone-{ver}-linux-{arch}.zip"
     base = f"https://downloads.rclone.org/{ver}/"
-    say(f"Scarico {name} da downloads.rclone.org …")
+    say(_('Downloading {name} from downloads.rclone.org …').format(name=name))
     data = fetch(base + name)
     sums = fetch(base + "SHA256SUMS").decode()
     expected = next((l.split()[0] for l in sums.splitlines() if l.strip().endswith(name)), None)
     actual = hashlib.sha256(data).hexdigest()
     if expected != actual:
-        sys.exit(f"Checksum NON valido per {name} (atteso {expected}, ottenuto {actual}): installazione annullata.")
+        sys.exit(_('Checksum NOT valid for {name} (expected {expected}, got {actual}): installation cancelled.').format(name=name, expected=expected, actual=actual))
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         member = next(n for n in z.namelist() if n.endswith("/rclone"))
         BIN_DIR.mkdir(parents=True, exist_ok=True)
@@ -473,7 +503,7 @@ def install_rclone() -> str:
         tmp.write_bytes(z.read(member))
         tmp.chmod(0o755)
         tmp.replace(target)
-    say(f"✓ rclone {ver} installato in {target} (checksum verificato)")
+    say(_('✓ rclone {ver} installed in {target} (checksum verified)').format(ver=ver, target=target))
     return str(target)
 
 
@@ -486,7 +516,7 @@ def rclone_conf_set(path: Path, section: str, values: dict[str, str | None]) -> 
     """Imposta (o rimuove, se None) chiavi in una sezione di rclone.conf senza toccare il resto."""
     text = path.read_text() if path.exists() else ""
     if text.startswith("# Encrypted rclone configuration"):
-        raise RuntimeError("la configurazione di rclone è cifrata")
+        raise RuntimeError(_('the rclone configuration is encrypted'))
     lines = text.splitlines()
     try:
         start = next(i for i, l in enumerate(lines) if l.strip() == f"[{section}]")
@@ -539,27 +569,27 @@ class Result:
 
 
 STATUS_TEXT = {
-    "ok": "✓ sincronizzato",
-    "offline": "… offline, riprovo appena torna la rete",
-    "busy": "… sincronizzazione in corso",
-    "stopped": "… interrotta",
-    "auth": "✗ login Apple scaduto o rifiutato",
-    "deletes": "✗ bloccato: troppe eliminazioni in una volta",
-    "access": "✗ bloccato: file di controllo mancante",
-    "empty": "✗ bloccato: uno dei due lati risulta vuoto",
-    "resync-needed": "✗ stato da ricostruire",
-    "remote": "✗ iCloud non raggiungibile",
-    "error": "✗ errore",
+    "ok": N_('✓ in sync'),
+    "offline": N_('… offline, retrying as soon as the network is back'),
+    "busy": N_('… sync in progress'),
+    "stopped": N_('… interrupted'),
+    "auth": N_('✗ Apple sign-in expired or refused'),
+    "deletes": N_('✗ blocked: too many deletions at once'),
+    "access": N_('✗ blocked: check file missing'),
+    "empty": N_('✗ blocked: one of the two sides looks empty'),
+    "resync-needed": N_('✗ sync state must be rebuilt'),
+    "remote": N_('✗ iCloud unreachable'),
+    "error": N_('✗ error'),
 }
 
 STATUS_HINT = {
-    "auth": f"Esegui:  {APP} login",
-    "deletes": f"Se le eliminazioni sono volute:  {APP} sync --force",
-    "access": f"Controlla che {CHECK_FILE} esista su entrambi i lati, poi:  {APP} resync",
-    "empty": f"Per sicurezza non elimino nulla. Se è corretto, per ricaricare i file:  {APP} resync",
-    "resync-needed": f"Esegui:  {APP} resync",
-    "remote": f"Se persiste:  {APP} login   (dettagli: {APP} doctor)",
-    "error": f"Dettagli:  {APP} log",
+    "auth": N_('Run:  icloud-sync login'),
+    "deletes": N_('If the deletions are intended:  icloud-sync sync --force'),
+    "access": N_('Check that .icloud-sync-check exists on both sides, then:  icloud-sync resync'),
+    "empty": N_('Nothing is deleted, to be safe. If this is right, to upload the files again:  icloud-sync resync'),
+    "resync-needed": N_('Run:  icloud-sync resync'),
+    "remote": N_('If it persists:  icloud-sync login   (details: icloud-sync doctor)'),
+    "error": N_('Details:  icloud-sync log'),
 }
 
 
@@ -852,7 +882,7 @@ class Engine:
         try:
             rc = self.child.wait()
         except KeyboardInterrupt:
-            say("\nInterruzione: attendo che rclone salvi lo stato …")
+            say(_('\nInterrupted: waiting for rclone to save its state …'))
             self.interrupt()
             self.child.wait()
             raise
@@ -870,7 +900,7 @@ class Engine:
         if rc == 0:
             return Result("ok", summarize(counts), counts)
         low = text.lower()
-        err = last_error(text) or f"rclone è uscito con codice {rc}"
+        err = last_error(text) or _('rclone exited with code {rc}').format(rc=rc)
         if AUTH_RE.search(text):
             return Result("auth", err)
         if "too many deletes" in low:
@@ -886,20 +916,20 @@ class Engine:
     def attempt(self, st: dict, *, resync: str | None, dry_run: bool, force: bool, interactive: bool, manual: bool) -> Result:
         if not self.local.is_dir():
             if st.get("baseline"):
-                return Result("error", f"cartella locale non trovata: {self.local} (disco non montato?)")
+                return Result("error", _('local folder not found: {local} (disk not mounted?)').format(local=self.local))
             self.local.mkdir(parents=True)
         if not self.online():
-            return Result("offline", "nessuna connessione")
+            return Result("offline", _('no connection'))
 
         ver = ".".join(map(str, rclone_version(self.rclone)))
         if st.get("rclone_version") != ver:
             if st.get("skipped") and st.get("rclone_version"):
-                log(f"rclone aggiornato a {ver}: riprovo i {len(st['skipped'])} elementi esclusi in precedenza")
+                log(_('rclone updated to {ver}: retrying the {v1} items skipped earlier').format(ver=ver, v1=len(st['skipped'])))
                 st["skipped"] = {}
             st["rclone_version"] = ver
 
         opts = dict(dry_run=dry_run, force=force, interactive=interactive, manual=manual)
-        for _ in range(3):
+        for _attempt in range(3):
             res, text = self.run_once(st, resync=resync, **opts)
             if res.status not in ("error", "resync-needed") or dry_run:
                 break
@@ -909,7 +939,7 @@ class Engine:
             st.setdefault("skipped", {}).update(new)
             self.new_skips += len(new)
             for path, why in sorted(new.items()):
-                log(f"Escluso dalla sincronizzazione: {path} — {why}")
+                log(_('Excluded from sync: {path} — {why}').format(path=path, why=_(why)))
             # le esclusioni cambiano i filtri: il giro successivo riallinea da solo
         return self.refine(res)
 
@@ -924,24 +954,24 @@ class Engine:
             sig = self.signature(ftext, empty_dirs)
             first = st.get("baseline") != sig
             if first and not resync:
-                log("Prima sincronizzazione (o configurazione cambiata): allineo i due lati senza eliminare nulla")
+                log(_('First sync (or configuration changed): aligning both sides without deleting anything'))
                 resync = "newer"
             if self.cfg["check_access"] and not dry_run and self.migrate_check_file():
-                log(f"File di controllo convertito: {OLD_CHECK_FILE} → {CHECK_FILE} (nascosto)")
+                log(_('Check file converted: {old_check_file} → {check_file} (hidden)').format(old_check_file=OLD_CHECK_FILE, check_file=CHECK_FILE))
             if resync and (manual or first) and self.cfg["check_access"]:
                 self.ensure_check_files()
             elif self.cfg["check_access"] and not dry_run and self.restore_local_check_file():
-                log(f"{CHECK_FILE} mancava nella cartella locale: ripristinato da iCloud")
+                log(_('{check_file} was missing in the local folder: restored from iCloud').format(check_file=CHECK_FILE))
         except RcloneFailure as e:
             return self.classify(e.rc, e.text), e.text
         except subprocess.TimeoutExpired:
-            return Result("remote", "timeout nel contattare il remote"), ""
+            return Result("remote", _('timeout while contacting the remote')), ""
 
         opts = dict(dry_run=dry_run, force=force, interactive=interactive, empty_dirs=empty_dirs)
         rc, text = self.bisync(resync=resync, **opts)
         if self.interrupted:
             # Arresto richiesto: non è un errore, la prossima esecuzione riprende da dove serve (--recover)
-            return Result("stopped", "interrotta su richiesta"), text
+            return Result("stopped", _('interrupted on request')), text
         res = self.classify(rc, text)
 
         if res.status == "deletes" and not force and not dry_run:
@@ -955,7 +985,7 @@ class Engine:
         unsyncable = bool(find_unsyncable(text))
         if (res.status == "resync-needed" and not resync and not dry_run and not unsyncable
                 and self.cfg["auto_resync"] and cooled):
-            log(f"Stato bisync non valido ({res.message}): ricostruisco con --resync (nessun file viene eliminato)")
+            log(_('Invalid bisync state ({message}): rebuilding with --resync (no file is deleted)').format(message=res.message))
             resync = "newer"
             rc, text = self.bisync(resync=resync, **opts)
             res = self.classify(rc, text)
@@ -982,8 +1012,8 @@ class Engine:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 if not manual:
-                    return Result("busy", "un'altra sincronizzazione è in corso")
-                say("Un'altra sincronizzazione è in corso: attendo che finisca …")
+                    return Result("busy", _('another sync is in progress'))
+                say(_('Another sync is in progress: waiting for it to finish …'))
                 fcntl.flock(lock, fcntl.LOCK_EX)
             st = load_state()
             prev = st.get("status")
@@ -1003,34 +1033,32 @@ class Engine:
             if any(res.counts.values()) or prev != "ok":
                 log(f"OK in {took}: {res.message}")
         elif res.status != prev or manual:
-            log(f"{STATUS_TEXT.get(res.status, res.status)} — {res.message}")
+            log(f"{_(STATUS_TEXT.get(res.status, res.status))} — {res.message}")
         return res
 
     def announce(self, prev: str | None, res: Result, st: dict) -> None:
         """Notifiche desktop. Un errore generico è quasi sempre passeggero (es. una cartella eliminata
         mentre veniva letta): viene riprovato in silenzio e segnalato solo se si ripete."""
         if self.new_skips:
-            notify(self.cfg, "iCloud Drive: elementi esclusi",
-                   f"{self.new_skips} elementi non scaricabili da iCloud sono stati esclusi dalla sincronizzazione.\n"
-                   f"Elenco:  {APP} skipped")
+            notify(self.cfg, _('iCloud Drive: items skipped'),
+                   _('{new_skips} items that cannot be downloaded from iCloud were excluded from sync.\nList:  {app} skipped').format(new_skips=self.new_skips, app=APP))
             self.new_skips = 0
         if res.ok:
             st["error_streak"] = 0
             if st.pop("alerted", False):
-                notify(self.cfg, "iCloud Drive", "Sincronizzazione ripristinata.")
+                notify(self.cfg, "iCloud Drive", _('Sync restored.'))
             if res.counts.get("conflicts"):
-                notify(self.cfg, "iCloud Drive: conflitto",
-                       f"{res.counts['conflicts']} file modificati su entrambi i lati. "
-                       "Entrambe le versioni sono state conservate (cerca «.conflict»).",
-                       actions=[("Apri cartella", "open", str(self.local))])
+                notify(self.cfg, _('iCloud Drive: conflict'),
+                       _('{v1} files changed on both sides. Both versions were kept (look for ".conflict").').format(v1=res.counts['conflicts']),
+                       actions=[(_('Open folder'), "open", str(self.local))])
         elif res.status not in ("offline", "busy"):
             st["error_streak"] = st.get("error_streak", 0) + 1 if res.status == "error" else 0
             persistent = res.status != "error" or st["error_streak"] >= 2
             if persistent and (res.status != prev or not st.get("alerted")):
                 st["alerted"] = True
-                notify(self.cfg, f"iCloud Drive: {STATUS_TEXT[res.status].lstrip('✗ ')}",
-                       f"{res.message}\n{STATUS_HINT.get(res.status, '')}", urgent=True,
-                       actions=[("Rinnova accesso", "login", "")] if res.status == "auth" else None)
+                notify(self.cfg, f"iCloud Drive: {_(STATUS_TEXT[res.status]).lstrip('✗ ')}",
+                       f"{res.message}\n{_(STATUS_HINT.get(res.status, ''))}", urgent=True,
+                       actions=[(_('Renew sign-in'), "login", "")] if res.status == "auth" else None)
 
 
 class RcloneFailure(Exception):
@@ -1060,8 +1088,8 @@ def parse_counts(text: str) -> dict:
 
 def summarize(c: dict) -> str:
     parts = [f"{c[k]} {label}" for k, label in
-             (("copied", "copiati"), ("deleted", "eliminati"), ("moved", "rinominati"), ("conflicts", "conflitti")) if c.get(k)]
-    return ", ".join(parts) or "nessuna modifica"
+             (("copied", _('copied')), ("deleted", _('deleted')), ("moved", _('renamed')), ("conflicts", _('in conflict'))) if c.get(k)]
+    return ", ".join(parts) or _('no changes')
 
 
 # ---------------------------------------------------------------- inotify
@@ -1081,7 +1109,7 @@ class Watcher:
         self.libc = ctypes.CDLL(None, use_errno=True)
         self.fd = self.libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
         if self.fd < 0:
-            raise OSError(ctypes.get_errno(), "inotify_init1 fallita")
+            raise OSError(ctypes.get_errno(), _('inotify_init1 failed'))
         self.paths: dict[int, str] = {}
         self.limit_hit = False
         self.add_tree(self.root)
@@ -1163,14 +1191,13 @@ def cmd_watch(cfg: dict, _args) -> int:
     try:
         watcher = Watcher(eng.local, exclude_matcher(cfg["exclude"]))
         if watcher.limit_hit:
-            log("Attenzione: limite di watch inotify raggiunto; alcune cartelle sono coperte solo dal controllo periodico "
-                "(aumenta fs.inotify.max_user_watches)")
+            log(_('Warning: inotify watch limit reached; some folders are covered only by the periodic check (raise fs.inotify.max_user_watches)'))
     except OSError as e:
-        log(f"inotify non disponibile ({e}): uso solo il controllo periodico")
+        log(_('inotify not available ({e}): using the periodic check only').format(e=e))
     probe_every = cfg["remote_check_interval"]
-    log(f"Avviato: {eng.local} ⇄ {eng.remote} — {len(watcher.paths) if watcher else 0} cartelle sorvegliate, "
-        + (f"controllo leggero di iCloud ogni {probe_every}s, " if probe_every else "")
-        + f"controllo completo ogni {cfg['poll_interval']}s")
+    log(_('Started: {local} ⇄ {remote} — {v1} folders watched, ').format(local=eng.local, remote=eng.remote, v1=len(watcher.paths) if watcher else 0)
+        + (_('light check of iCloud every {probe_every}s, ').format(probe_every=probe_every) if probe_every else "")
+        + _('full check every {v1}s').format(v1=cfg['poll_interval']))
 
     INF = float("inf")
     next_poll = not_before = 0.0
@@ -1184,7 +1211,7 @@ def cmd_watch(cfg: dict, _args) -> int:
         if PAUSE_FILE.exists():
             if not paused:
                 paused = True
-                log("In pausa")
+                log(_('Paused'))
             select.select([rfd], [], [], 5)
             with contextlib.suppress(BlockingIOError):
                 os.read(rfd, 4096)
@@ -1192,7 +1219,7 @@ def cmd_watch(cfg: dict, _args) -> int:
             continue
         if paused:
             paused = False
-            log("Ripresa")
+            log(_('Resumed'))
             flags["now"] = True  # recupera subito ciò che è cambiato durante la pausa
         now = time.monotonic()
         evt_due = min(last_evt + cfg["debounce"], first_evt + cfg["max_wait"]) if first_evt is not None else INF
@@ -1225,10 +1252,10 @@ def cmd_watch(cfg: dict, _args) -> int:
             if flags["stop"]:
                 break
             if pulled:
-                names = ", ".join(os.path.basename(f) for f in pulled[:3]) + (f" e altri {len(pulled) - 3}" if len(pulled) > 3 else "")
-                log(f"Da iCloud: {len(pulled)} nuovi file ({names})")
+                names = ", ".join(os.path.basename(f) for f in pulled[:3]) + (_(' and {v1} more').format(v1=len(pulled) - 3) if len(pulled) > 3 else "")
+                log(_('From iCloud: {v1} new files ({names})').format(v1=len(pulled), names=names))
                 if cfg["notify_downloads"]:
-                    notify(cfg, "Nuovo da iCloud Drive", names, actions=[("Mostra", "show", str(eng.local / pulled[0]))])
+                    notify(cfg, _('New from iCloud Drive'), names, actions=[(_('Show'), "show", str(eng.local / pulled[0]))])
                 if watcher:
                     watcher.poll()  # gli eventi dei file appena scaricati non richiedono un altro giro
         else:
@@ -1263,7 +1290,7 @@ def cmd_watch(cfg: dict, _args) -> int:
             if dirty and first_evt is None:
                 first_evt = last_evt = now
 
-    log("Arrestato")
+    log(_('Stopped'))
     PID_FILE.unlink(missing_ok=True)
     return 0
 
@@ -1278,9 +1305,9 @@ def login_reminder(cfg: dict) -> None:
     if left <= 4 and st.get("last_reminder") != today:
         st["last_reminder"] = today
         save_state(st)
-        notify(cfg, "iCloud Drive: login in scadenza",
-               f"Il login Apple scade tra circa {max(0, int(left))} giorni.\nRinnovalo con:  {APP} login",
-               actions=[("Rinnova accesso", "login", "")])
+        notify(cfg, _('iCloud Drive: sign-in expiring'),
+               _('The Apple sign-in expires in about {v1} days.\nRenew it with:  {app} login').format(v1=max(0, int(left)), app=APP),
+               actions=[(_('Renew sign-in'), "login", "")])
 
 
 def pid_of(pidfile: Path) -> int | None:
@@ -1309,10 +1336,10 @@ def poke_daemon() -> bool:
 # ---------------------------------------------------------------- comandi
 
 def finish(res: Result) -> int:
-    say(f"{STATUS_TEXT.get(res.status, res.status)} — {res.message}")
+    say(f"{_(STATUS_TEXT.get(res.status, res.status))} — {res.message}")
     if not res.ok:
         if STATUS_HINT.get(res.status):
-            say(STATUS_HINT[res.status])
+            say(_(STATUS_HINT[res.status]))
         return 1
     return 0
 
@@ -1323,8 +1350,8 @@ def finish_dry_run(res: Result) -> int:
         return finish(res)
     planned = [LOG_PREFIX_RE.sub("", l).replace("NOTICE: ", "").replace(" as --dry-run is set", "")
                for l in RUN_LOG.read_text(errors="replace").splitlines() if "--dry-run is set" in l]
-    say("\n".join(f"  {l}" for l in planned) if planned else "Nessuna modifica da fare.")
-    say("(anteprima: non è stato modificato nulla)")
+    say("\n".join(f"  {l}" for l in planned) if planned else _('Nothing to change.'))
+    say(_('(preview: nothing was changed)'))
     return 0
 
 
@@ -1335,7 +1362,7 @@ def cmd_sync(cfg: dict, args) -> int:
 
 def cmd_resync(cfg: dict, args) -> int:
     mode = {"newer": "newer", "local": "path1", "icloud": "path2"}[args.prefer]
-    say("Riallineo i due lati: i file presenti da una sola parte vengono copiati dall'altra, nulla viene eliminato.")
+    say(_('Realigning both sides: files present on one side only are copied to the other, nothing is deleted.'))
     res = Engine(cfg).sync(resync=mode, dry_run=args.dry_run, interactive=sys.stdout.isatty(), manual=True)
     return finish_dry_run(res) if args.dry_run else finish(res)
 
@@ -1349,7 +1376,7 @@ def store_credentials(rclone: str, name: str, apple_id: str | None, password: st
     if apple_id is not None:
         p = subprocess.run([rclone, "obscure", "-"], input=password, capture_output=True, text=True)
         if p.returncode != 0 or not p.stdout.strip():
-            raise RuntimeError(f"rclone obscure fallito: {p.stderr.strip()}")
+            raise RuntimeError(_('rclone obscure failed: {v1}').format(v1=p.stderr.strip()))
         values.update(type="iclouddrive", apple_id=apple_id, password=p.stdout.strip())
     if values:
         rclone_conf_set(rclone_conf_path(rclone), name, values)
@@ -1371,7 +1398,7 @@ def cmd_login(cfg: dict, args) -> int:
     rclone = need_rclone(cfg)
     name = remote_name(cfg["remote"])
     if not name:
-        sys.exit(f"«{cfg['remote']}» non è un remote rclone: niente login da fare.")
+        sys.exit(_('"{v1}" is not an rclone remote: there is nothing to sign in to.').format(v1=cfg['remote']))
     remotes = subprocess.run([rclone, "listremotes"], capture_output=True, text=True).stdout.split()
     exists = f"{name}:" in remotes
     if getattr(args, "gui", False) and gui_available():
@@ -1380,26 +1407,24 @@ def cmd_login(cfg: dict, args) -> int:
         apple_id = pw = None
         if not exists or args.new_password:
             apple_id = getattr(args, "apple_id", None) or ask("Apple ID (email)")
-            say("Password dell'Apple ID (quella normale, non una «password per app»).")
-            say("Viene salvata solo nella configurazione locale di rclone, offuscata.")
+            say(_('Apple ID password (the normal one, not an "app-specific password").'))
+            say(_('It is saved only in the local rclone configuration, obscured.'))
             pw = getpass.getpass("Password: ")
         try:
             store_credentials(rclone, name, apple_id, pw, reset=args.reset)
         except RuntimeError as e:
-            sys.exit(f"Non posso salvare le credenziali: {e}.\nCrea il remote a mano con `rclone config` "
-                     f"(nome «{name}», tipo «iclouddrive») e rilancia.")
-    say("\nOra Apple chiederà il codice di verifica a 2 fattori (arriva sui tuoi dispositivi Apple).")
-    say("Con la Protezione avanzata dei dati attiva: abilita prima «Accedi ai dati iCloud sul web» su iPhone.\n")
+            sys.exit(_('Cannot save the credentials: {e}.\nCreate the remote by hand with `rclone config` (name "{name}", type "iclouddrive") and run this again.').format(e=e, name=name))
+    say(_('\nApple will now ask for the two-factor verification code (it arrives on your Apple devices).'))
+    say(_('With Advanced Data Protection on, first enable "Access iCloud Data on the Web" on your iPhone.\n'))
     if subprocess.call([rclone, "config", "reconnect", f"{name}:"]) != 0:
-        say(f"\n✗ Login non riuscito. Riprova con:  {APP} login --reset   (azzera cookie e token salvati)")
+        say(_('\n✗ Sign-in failed. Try again with:  {app} login --reset   (clears the saved cookies and token)').format(app=APP))
         return 1
     p = subprocess.run([rclone, "lsf", cfg["remote"], "--max-depth", "1"], capture_output=True, text=True)
     if p.returncode != 0:
-        say(f"\n✗ Login completato ma iCloud Drive non risponde: {last_error(p.stderr) or p.stderr.strip()[-300:]}")
+        say(_('\n✗ Sign-in completed but iCloud Drive does not answer: {v1}').format(v1=last_error(p.stderr) or p.stderr.strip()[-300:]))
         return 1
     login_done()
-    say(f"\n✓ Login riuscito: {len(p.stdout.splitlines())} elementi nella radice di iCloud Drive. "
-        f"Valido circa {TRUST_DAYS} giorni.")
+    say(_('\n✓ Signed in: {v1} items in the root of iCloud Drive. Valid for about {trust_days} days.').format(v1=len(p.stdout.splitlines()), trust_days=TRUST_DAYS))
     return 0
 
 
@@ -1416,7 +1441,7 @@ def parse_config_reply(rc: int, stdout: str, stderr: str) -> tuple[dict | None, 
         reply = json.loads(stdout)
     except ValueError:
         lines = [l for l in (stderr + "\n" + stdout).splitlines() if l.strip()]
-        text = last_error(stderr) or (LOG_PREFIX_RE.sub("", lines[-1]) if lines else f"rclone è uscito con codice {rc}")
+        text = last_error(stderr) or (LOG_PREFIX_RE.sub("", lines[-1]) if lines else _('rclone exited with code {rc}').format(rc=rc))
         return None, re.sub(r"^(NOTICE: )?(Fatal error: )?", "", text)
     option = reply.get("Option")
     if not option:
@@ -1434,14 +1459,14 @@ def login_dialog(QtCore, QtWidgets, cfg: dict, rclone: str, ask_credentials: boo
     """
     name = remote_name(cfg["remote"])
     dlg = QtWidgets.QDialog()
-    dlg.setWindowTitle("Accesso Apple — iCloud Drive")
+    dlg.setWindowTitle(_('Apple sign-in — iCloud Drive'))
     info, error = QtWidgets.QLabel(), QtWidgets.QLabel()
     apple_id, password, answer = QtWidgets.QLineEdit(), QtWidgets.QLineEdit(), QtWidgets.QLineEdit()
     apple_id.setPlaceholderText("Apple ID (email)")
-    password.setPlaceholderText("Password dell'Apple ID")
+    password.setPlaceholderText(_('Apple ID password'))
     password.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
     error.setStyleSheet("color: #da4453;")
-    go, cancel = QtWidgets.QPushButton(), QtWidgets.QPushButton("Annulla")
+    go, cancel = QtWidgets.QPushButton(), QtWidgets.QPushButton(_('Cancel'))
     go.setDefault(True)
     layout = QtWidgets.QVBoxLayout(dlg)
     layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetFixedSize)  # la finestra segue il contenuto
@@ -1461,9 +1486,7 @@ def login_dialog(QtCore, QtWidgets, cfg: dict, rclone: str, ask_credentials: boo
     watchdog.setSingleShot(True)
     watchdog.timeout.connect(proc.kill)
     st = {"step": "", "question": None, "then": None, "ok": False}
-    first = ("Inserisci l'Apple ID e la sua password normale (non una «password per app»). "
-             "La password resta sul tuo PC, nella configurazione di rclone.\n\n"
-             "Con la Protezione avanzata dei dati attiva, abilita prima «Accedi ai dati iCloud sul web» su iPhone.")
+    first = (_('Enter your Apple ID and its normal password (not an "app-specific password"). The password stays on your PC, in the rclone configuration.\n\nWith Advanced Data Protection on, first enable "Access iCloud Data on the Web" on your iPhone.'))
 
     def show(step: str, text: str, problem: str = "") -> None:
         st["step"] = step
@@ -1474,8 +1497,8 @@ def login_dialog(QtCore, QtWidgets, cfg: dict, rclone: str, ask_credentials: boo
         password.setVisible(step == "credentials")
         answer.setVisible(step == "question")
         go.setEnabled(step not in ("working", "verify"))
-        go.setText({"credentials": "Accedi", "confirm": "Continua", "question": "Conferma", "failed": "Riprova",
-                    "done": "Chiudi"}.get(step, "Attendi…"))
+        go.setText({"credentials": _('Sign in'), "confirm": _('Continue'), "question": _('Confirm'), "failed": _('Try again'),
+                    "done": _('Close')}.get(step, _('Please wait…')))
         cancel.setVisible(step != "done")
         if step == "question":
             answer.clear()
@@ -1487,7 +1510,7 @@ def login_dialog(QtCore, QtWidgets, cfg: dict, rclone: str, ask_credentials: boo
         watchdog.start(180_000)
 
     def start_flow() -> None:
-        show("working", "Contatto Apple…")
+        show("working", _('Contacting Apple…'))
         run(["config", "update", name, "--non-interactive"], on_reply)
 
     def on_reply(rc: int, out: str, err: str) -> None:
@@ -1496,23 +1519,22 @@ def login_dialog(QtCore, QtWidgets, cfg: dict, rclone: str, ask_credentials: boo
             st["question"] = question
             answer.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password if question["secret"]
                                else QtWidgets.QLineEdit.EchoMode.Normal)
-            text = ("Inserisci il codice a 6 cifre arrivato sui tuoi dispositivi Apple.\n"
-                    "Se non arriva, scrivi «sms» per riceverlo via messaggio."
+            text = (_('Enter the 6-digit code that arrived on your Apple devices.\nIf it does not arrive, type "sms" to get it by text message.')
                     if question["name"] == "config_2fa" else question["help"])
             show("question", text, problem)
         elif problem:
-            show("failed", "Accesso non riuscito.", problem)
+            show("failed", _('Sign-in failed.'), problem)
         else:
-            show("verify", "Verifico l'accesso a iCloud Drive…")
+            show("verify", _('Checking access to iCloud Drive…'))
             run(["lsf", cfg["remote"], "--max-depth", "1"], on_verified)
 
     def on_verified(rc: int, _out: str, err: str) -> None:
         if rc != 0:
-            show("failed", "Accesso completato, ma iCloud Drive non risponde.", last_error(err) or err.strip()[-300:])
+            show("failed", _('Sign-in completed, but iCloud Drive does not answer.'), last_error(err) or err.strip()[-300:])
             return
         login_done()
         st["ok"] = True
-        show("done", f"Accesso riuscito. Vale circa {TRUST_DAYS} giorni: ti avviso qualche giorno prima della scadenza.")
+        show("done", _('Signed in. It lasts about {trust_days} days: you will be reminded a few days before it expires.').format(trust_days=TRUST_DAYS))
 
     def on_finished(code: int, _status) -> None:
         watchdog.stop()
@@ -1523,7 +1545,7 @@ def login_dialog(QtCore, QtWidgets, cfg: dict, rclone: str, ask_credentials: boo
     def on_error(kind) -> None:
         if kind == QtCore.QProcess.ProcessError.FailedToStart:
             watchdog.stop()
-            show("failed", "Impossibile avviare rclone.", rclone)
+            show("failed", _('Cannot start rclone.'), rclone)
 
     def on_go() -> None:
         step = st["step"]
@@ -1531,7 +1553,7 @@ def login_dialog(QtCore, QtWidgets, cfg: dict, rclone: str, ask_credentials: boo
             dlg.accept()
         elif step == "credentials":
             if not apple_id.text().strip() or not password.text():
-                show("credentials", first, "Inserisci Apple ID e password.")
+                show("credentials", first, _('Enter your Apple ID and password.'))
                 return
             try:
                 store_credentials(rclone, name, apple_id.text().strip(), password.text(), reset=True)
@@ -1541,7 +1563,7 @@ def login_dialog(QtCore, QtWidgets, cfg: dict, rclone: str, ask_credentials: boo
             password.clear()
             start_flow()
         elif step == "question":
-            show("working", "Contatto Apple…")
+            show("working", _('Contacting Apple…'))
             run(["config", "update", name, "--non-interactive", "--continue",
                  "--state", st["question"]["state"], "--result", answer.text().strip()], on_reply)
         elif step == "confirm":
@@ -1557,8 +1579,7 @@ def login_dialog(QtCore, QtWidgets, cfg: dict, rclone: str, ask_credentials: boo
     if ask_credentials:
         show("credentials", first)
     else:  # mai contattare Apple per un clic sbagliato: il rinnovo fa partire un nuovo codice
-        show("confirm", "Rinnovare ora l'accesso ad Apple?\n\nApple invierà un codice di verifica ai tuoi dispositivi: "
-                        "tienine uno a portata di mano.")
+        show("confirm", _('Renew the Apple sign-in now?\n\nApple will send a verification code to your devices: keep one at hand.'))
     dlg.st, dlg.widgets = st, {"apple_id": apple_id, "password": password, "answer": answer, "go": go,
                                "info": info, "error": error}
     return dlg
@@ -1592,7 +1613,7 @@ def installed_script() -> Path:
         BIN_DIR.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(me, target)
         target.chmod(0o755)
-        say(f"✓ Installato {target}")
+        say(_('✓ Installed {target}').format(target=target))
     return target
 
 
@@ -1618,7 +1639,7 @@ def cmd_enable(cfg: dict, _args) -> int:
     if rc != 0:
         return rc
     systemctl("restart", UNIT_NAME)
-    say("✓ Servizio attivo: parte da solo a ogni accesso.")
+    say(_('✓ Service active: it starts by itself at every login.'))
     PAUSE_FILE.unlink(missing_ok=True)
     mark_folder(Path(os.path.expanduser(cfg["local"])).absolute(), True)
     if has_tray_support():
@@ -1628,11 +1649,11 @@ def cmd_enable(cfg: dict, _args) -> int:
             f'Exec="{sys.executable}" "{script}" tray\nIcon={APP}\nTerminal=false\n'
             "X-GNOME-Autostart-enabled=true\nX-KDE-autostart-phase=2\n")
         start_tray(script)
-        say("✓ Icona nel vassoio di sistema attiva.")
+        say(_('✓ Tray icon active.'))
     else:
-        say("Per l'icona nel vassoio installa PyQt6 (sudo apt install python3-pyqt6) e ripeti il comando.")
+        say(_('For the tray icon install PyQt6 (sudo apt install python3-pyqt6) and run this command again.'))
     if not is_system_install() and str(BIN_DIR) not in os.environ.get("PATH", "").split(":"):
-        say(f"Nota: {BIN_DIR} non è nel PATH; aggiungilo o usa il percorso completo.")
+        say(_('Note: {bin_dir} is not in PATH; add it or use the full path.').format(bin_dir=BIN_DIR))
     return 0
 
 
@@ -1646,7 +1667,7 @@ def cmd_disable(cfg: dict, _args) -> int:
     if tray:
         with contextlib.suppress(OSError):
             os.kill(tray, signal.SIGTERM)
-    say("Servizio e icona disattivati. Configurazione e file restano dove sono.")
+    say(_('Service and tray icon disabled. Configuration and files stay where they are.'))
     return 0
 
 
@@ -1664,14 +1685,14 @@ def cmd_pause(_cfg: dict, _args) -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     PAUSE_FILE.touch()
     poke_daemon()
-    say(f"Sincronizzazione in pausa. Per riprendere:  {APP} resume")
+    say(_('Sync paused. To resume:  {app} resume').format(app=APP))
     return 0
 
 
 def cmd_resume(_cfg: dict, _args) -> int:
     PAUSE_FILE.unlink(missing_ok=True)
     poke_daemon()
-    say("Sincronizzazione ripresa.")
+    say(_('Sync resumed.'))
     return 0
 
 
@@ -1689,21 +1710,21 @@ def tray_state() -> tuple[str, str, str]:
     st = load_state()
     status = st.get("status")
     if is_syncing():
-        return "sync", "Sincronizzazione in corso…", ""
+        return "sync", _('Sync in progress…'), ""
     if pid_of(PID_FILE) is None:
-        return "stopped", "Sincronizzazione automatica ferma", f"Avvia con:  {APP} enable"
+        return "stopped", _('Automatic sync is stopped'), _('Start it with:  {app} enable').format(app=APP)
     if PAUSE_FILE.exists():
-        return "stopped", "In pausa", ""
+        return "stopped", _('Paused'), ""
     if status == "ok":
-        return "ok", f"Sincronizzato {ago(st.get('last_success'))}", ""
+        return "ok", _('In sync, {v1}').format(v1=ago(st.get('last_success'))), ""
     if status == "offline":
-        return "offline", "Offline: riprendo appena torna la rete", ""
+        return "offline", _('Offline: resuming as soon as the network is back'), ""
     if status in (None, "busy", "stopped"):
-        return "unknown", "In attesa della prima sincronizzazione", ""
+        return "unknown", _('Waiting for the first sync'), ""
     if status == "error" and st.get("error_streak", 0) < 2:
-        return "offline", "Problema temporaneo: riprovo tra poco", ""
-    text = STATUS_TEXT.get(status, status).lstrip("✗… ")
-    return "error", text[:1].upper() + text[1:], STATUS_HINT.get(status, "")
+        return "offline", _('Temporary problem: retrying shortly'), ""
+    text = _(STATUS_TEXT.get(status, status)).lstrip("✗… ")
+    return "error", text[:1].upper() + text[1:], _(STATUS_HINT.get(status, ""))
 
 
 def tray_pixmap(QtCore, QtGui, kind: str, size: int = 64):
@@ -1767,7 +1788,7 @@ def text_window(QtWidgets, title: str, read_text, extra: tuple | None = None):
 
     row = QtWidgets.QHBoxLayout()
     row.addStretch(1)
-    for label, action in ([extra] if extra else []) + [("Aggiorna", lambda: None), ("Chiudi", win.close)]:
+    for label, action in ([extra] if extra else []) + [(_('Refresh'), lambda: None), (_('Close'), win.close)]:
         button = QtWidgets.QPushButton(label)
         button.clicked.connect(lambda _checked=False, fn=action: (fn(), load()))
         row.addWidget(button)
@@ -1813,18 +1834,18 @@ def build_tray_menu(QtCore, QtGui, QtWidgets, cfg: dict, on_quit):
     status_item.setEnabled(False)
     hint_item.setEnabled(False)
     menu.addSeparator()
-    item("Apri cartella iCloud Drive", "folder-open", open_folder)
-    sync_item = item("Sincronizza ora", "view-refresh", sync_now)
+    item(_('Open iCloud Drive folder'), "folder-open", open_folder)
+    sync_item = item(_('Sync now'), "view-refresh", sync_now)
     pause_item = item("", "media-playback-pause", toggle_pause)
     menu.addSeparator()
     skipped_item = item("", "dialog-warning", lambda: windows.append(text_window(
-        QtWidgets, "Elementi esclusi — iCloud Drive", skipped_text, ("Riprova tutti", retry_skipped))))
-    item("Registro attività…", "text-x-log", lambda: windows.append(text_window(
-        QtWidgets, "Registro attività — iCloud Drive", lambda: log_text(300))))
+        QtWidgets, _('Skipped items — iCloud Drive'), skipped_text, (_('Retry all'), retry_skipped))))
+    item(_('Activity log…'), "text-x-log", lambda: windows.append(text_window(
+        QtWidgets, _('Activity log — iCloud Drive'), lambda: log_text(300))))
     login_item = item("", "dialog-password", lambda: subprocess.Popen(
         [sys.executable, str(script), "login", "--gui"], **quiet))
     menu.addSeparator()
-    item("Chiudi icona", "application-exit", on_quit)
+    item(_('Close tray icon'), "application-exit", on_quit)
 
     def refresh() -> tuple[str, str]:
         kind, text, hint = tray_state()
@@ -1834,12 +1855,12 @@ def build_tray_menu(QtCore, QtGui, QtWidgets, cfg: dict, on_quit):
         hint_item.setText(hint)
         hint_item.setVisible(bool(hint))
         sync_item.setEnabled(kind != "sync" and not paused)
-        pause_item.setText("Riprendi la sincronizzazione" if paused else "Metti in pausa")
-        skipped_item.setText(f"Elementi esclusi ({len(st.get('skipped', {}))})…")
+        pause_item.setText(_('Resume sync') if paused else _('Pause'))
+        skipped_item.setText(_('Skipped items ({v1})…').format(v1=len(st.get('skipped', {}))))
         skipped_item.setVisible(bool(st.get("skipped")))
         days = login_days_left(st)
-        login_item.setText("Rinnova accesso Apple…" if days is None
-                           else f"Rinnova accesso Apple… (restano {max(days, 0)} giorni)")
+        login_item.setText(_('Renew Apple sign-in…') if days is None
+                           else _('Renew Apple sign-in… ({v1} days left)').format(v1=max(days, 0)))
         return kind, text
 
     menu.items = {"status": status_item, "hint": hint_item, "sync": sync_item, "pause": pause_item,
@@ -1851,13 +1872,13 @@ def cmd_tray(cfg: dict, _args) -> int:
     try:
         from PyQt6 import QtCore, QtGui, QtWidgets
     except ImportError:
-        sys.exit("Per l'icona nel vassoio serve PyQt6:  sudo apt install python3-pyqt6")
+        sys.exit(_('The tray icon needs PyQt6:  sudo apt install python3-pyqt6'))
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     lock = TRAY_LOCK.open("a+")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        say("L'icona nel vassoio è già attiva.")
+        say(_('The tray icon is already running.'))
         return 0
     lock.seek(0)
     lock.truncate()
@@ -1910,9 +1931,9 @@ def cmd_restart(_cfg: dict, _args) -> int:
 
 def service_state() -> str:
     if not shutil.which("systemctl"):
-        return "systemd non disponibile"
+        return _('systemd not available')
     s = systemctl("is-active", UNIT_NAME, quiet=True).stdout.strip()
-    return {"active": "attivo", "inactive": "fermo", "failed": "fallito"}.get(s, s or "non installato")
+    return {"active": _('active'), "inactive": _('stopped'), "failed": _('failed')}.get(s, s or _('not installed'))
 
 
 def cmd_status(cfg: dict, args) -> int:
@@ -1922,30 +1943,30 @@ def cmd_status(cfg: dict, args) -> int:
         say(json.dumps({**st, "service": service_state(), "local": cfg["local"], "remote": cfg["remote"]}, indent=1))
         return 0 if status == "ok" else 1
     say(f"{cfg['local']}  ⇄  {cfg['remote']}")
-    line = STATUS_TEXT.get(status, "mai sincronizzato")
+    line = _(STATUS_TEXT.get(status, N_('never synced')))
     if status == "ok":
         line += f" ({ago(st.get('last_success'))}, {summarize(st.get('last_counts', {}))})"
-    say(f"  Stato:      {line}")
+    say(_('  State:      {line}').format(line=line))
     if status and status not in ("ok", "busy", "offline"):
         say(f"              {st.get('message', '')}")
         if STATUS_HINT.get(status):
-            say(f"              → {STATUS_HINT[status]}")
-        say(f"  Ultima ok:  {ago(st.get('last_success'))}")
+            say(f"              → {_(STATUS_HINT[status])}")
+        say(_('  Last ok:    {v1}').format(v1=ago(st.get('last_success'))))
     if st.get("skipped"):
-        say(f"  Esclusi:    {len(st['skipped'])} elementi non scaricabili da iCloud → {APP} skipped")
-    say(f"  Servizio:   {service_state()}" + (f" — IN PAUSA ({APP} resume)" if PAUSE_FILE.exists() else ""))
+        say(_('  Skipped:    {v1} items that cannot be downloaded from iCloud → {app} skipped').format(v1=len(st['skipped']), app=APP))
+    say(_('  Service:    {v1}').format(v1=service_state()) + (_(' — PAUSED ({app} resume)').format(app=APP) if PAUSE_FILE.exists() else ""))
     if st.get("last_login"):
         left = TRUST_DAYS - (time.time() - st["last_login"]) / 86400
-        say("  Login:      " + (f"valido ancora ~{int(left)} giorni" if left > 0 else f"probabilmente scaduto → {APP} login"))
+        say(_('  Sign-in:    ') + (_('valid for about {v1} more days').format(v1=int(left)) if left > 0 else _('probably expired → {app} login').format(app=APP)))
     return 0 if status == "ok" else 1
 
 
 def skipped_text() -> str:
     skipped = load_state().get("skipped", {})
     if not skipped:
-        return "Nessun elemento escluso: tutto ciò che è in iCloud Drive viene sincronizzato."
-    lines = ["Elementi che rclone non riesce a scaricare da iCloud e che quindi NON vengono sincronizzati:"]
-    lines += [f"  {path}\n      {why}" for path, why in sorted(skipped.items())]
+        return _('No skipped items: everything in iCloud Drive is being synced.')
+    lines = [_('Items that rclone cannot download from iCloud and that are therefore NOT synced:')]
+    lines += [f"  {path}\n      {_(why)}" for path, why in sorted(skipped.items())]
     return "\n".join(lines)
 
 
@@ -1962,17 +1983,17 @@ def retry_skipped() -> int:
 
 def cmd_skipped(_cfg: dict, args) -> int:
     if args.retry and load_state().get("skipped"):
-        say(f"{retry_skipped()} esclusioni rimosse: verranno riprovate alla prossima sincronizzazione.")
+        say(_('{v1} exclusions removed: they will be retried at the next sync.').format(v1=retry_skipped()))
         return 0
     say(skipped_text())
     if load_state().get("skipped"):
-        say(f"\nPer riprovarli (es. dopo un aggiornamento di rclone):  {APP} skipped --retry")
+        say(_('\nTo retry them (e.g. after an rclone update):  {app} skipped --retry').format(app=APP))
     return 0
 
 
 def log_text(lines: int, path: Path = LOG_FILE) -> str:
     if not path.exists():
-        return "Nessun log ancora."
+        return _('No log yet.')
     return "\n".join(path.read_text(errors="replace").splitlines()[-lines:])
 
 
@@ -1997,122 +2018,122 @@ def cmd_doctor(cfg: dict, _args) -> int:
     rclone = find_rclone(cfg)
     ver = rclone_version(rclone) if rclone else (0,)
     check(bool(rclone) and ver[:2] >= MIN_RCLONE, "rclone",
-          f"{rclone} v{'.'.join(map(str, ver))}" if rclone else f"mancante → {APP} install-rclone")
+          f"{rclone} v{'.'.join(map(str, ver))}" if rclone else _('missing → {app} install-rclone').format(app=APP))
     if not rclone or ver[:2] < MIN_RCLONE:
         return 1
     eng = Engine(cfg)
     name = remote_name(eng.remote)
     if name:
         remotes = eng.run(["listremotes"]).stdout.split()
-        check(f"{name}:" in remotes, f"remote «{name}» configurato", "" if f"{name}:" in remotes else f"→ {APP} login")
-    check(eng.online(), "rete", cfg["connectivity_host"] or "controllo disattivato")
+        check(f"{name}:" in remotes, _('remote "{name}" configured').format(name=name), "" if f"{name}:" in remotes else f"→ {APP} login")
+    check(eng.online(), _('network'), cfg["connectivity_host"] or _('check disabled'))
     t0 = time.time()
     ok, err = eng.probe()
-    check(ok, "iCloud Drive risponde", f"{time.time() - t0:.1f}s" if ok else f"{err} → {APP} login")
-    check(eng.local.is_dir(), "cartella locale", str(eng.local))
+    check(ok, _('iCloud Drive answers'), f"{time.time() - t0:.1f}s" if ok else f"{err} → {APP} login")
+    check(eng.local.is_dir(), _('local folder'), str(eng.local))
     if cfg["check_access"] and ok:
         lf = (eng.local / CHECK_FILE).exists()
         p = eng.run(["lsf", remote_join(eng.remote, CHECK_FILE)])
         rf = p.returncode == 0 and bool(p.stdout.strip())
-        check(lf and rf, f"file di controllo {CHECK_FILE}",
-              "presente su entrambi i lati" if lf and rf else f"locale: {'sì' if lf else 'no'}, iCloud: {'sì' if rf else 'no'} → {APP} resync")
+        check(lf and rf, _('check file {check_file}').format(check_file=CHECK_FILE),
+              _('present on both sides') if lf and rf else _('local: {v1}, iCloud: {v2} → {app} resync').format(v1=_('yes') if lf else _('no'), v2=_('yes') if rf else _('no'), app=APP))
     if eng.local.is_dir():
         ndirs = sum(1 for _ in os.walk(eng.local))
         try:
             limit = int(Path("/proc/sys/fs/inotify/max_user_watches").read_text())
         except (OSError, ValueError):
             limit = 0
-        check(not limit or ndirs < limit * 0.8, "inotify", f"{ndirs} cartelle, limite {limit}")
+        check(not limit or ndirs < limit * 0.8, "inotify", _('{ndirs} folders, limit {limit}').format(ndirs=ndirs, limit=limit))
     svc = service_state()
-    check(svc == "attivo", "servizio", svc if svc == "attivo" else f"{svc} → {APP} enable")
+    check(svc == _('active'), _('service'), svc if svc == _('active') else f"{svc} → {APP} enable")
     st = load_state()
-    check(st.get("status") == "ok", "ultima sincronizzazione",
-          f"{STATUS_TEXT.get(st.get('status'), 'mai eseguita')} ({ago(st.get('last_attempt'))})")
+    check(st.get("status") == "ok", _('last sync'),
+          f"{_(STATUS_TEXT.get(st.get('status'), N_('never run')))} ({ago(st.get('last_attempt'))})")
     return 1 if bad else 0
 
 
 def cmd_setup(_cfg, _args) -> int:
-    say(f"=== {APP}: configurazione guidata ===")
-    say("Software libero (licenza MIT), fornito senza alcuna garanzia: tieni un backup dei file importanti.\n")
+    say(_('=== {app}: guided setup ===').format(app=APP))
+    say(_('Free software (MIT license), provided without any warranty: keep a backup of your important files.\n'))
     cfg = load_config(required=False)
 
     rclone = find_rclone(cfg)
     if not rclone or rclone_version(rclone)[:2] < MIN_RCLONE:
-        say("rclone (>= 1.69) non è installato: è il motore che parla con iCloud.")
-        if not confirm("Scarico il binario ufficiale da rclone.org in ~/.local/bin (con verifica del checksum)?"):
-            say(f"Installalo (es. sudo apt install rclone) e rilancia:  {APP} setup")
+        say(_('rclone (>= 1.69) is not installed: it is the engine that talks to iCloud.'))
+        if not confirm(_('Download the official binary from rclone.org into ~/.local/bin (with checksum verification)?')):
+            say(_('Install it (e.g. sudo apt install rclone) and run again:  {app} setup').format(app=APP))
             return 1
         install_rclone()
 
     if not CONFIG_FILE.exists():
-        name = ask("Nome del remote rclone", "icloud")
+        name = ask(_('Name of the rclone remote'), "icloud")
         cfg["remote"] = f"{name}:"
-        cfg["local"] = ask("Cartella locale", DEFAULTS["local"])
+        cfg["local"] = ask(_('Local folder'), DEFAULTS["local"])
     write_config(cfg)
-    say(f"✓ Configurazione: {CONFIG_FILE}\n")
+    say(_('✓ Configuration: {config_file}\n').format(config_file=CONFIG_FILE))
 
     ns = argparse.Namespace(new_password=False, reset=False, apple_id=None)
     eng = Engine(cfg)
     ok = False
     if remote_name(cfg["remote"]) and f"{remote_name(cfg['remote'])}:" in eng.run(["listremotes"]).stdout.split():
-        ok, _ = eng.probe()
+        ok, _err = eng.probe()
     if remote_name(cfg["remote"]) and not ok:
         if cmd_login(cfg, ns) != 0:
             return 1
 
-    say("\nPrima sincronizzazione: unisce i due lati senza eliminare nulla; a parità di nome vince il file più recente.")
-    say("Può richiedere tempo se iCloud Drive contiene molti file.\n")
+    say(_('\nFirst sync: it merges both sides without deleting anything; when two files share a name the newer one wins.'))
+    say(_('It can take a while if iCloud Drive holds many files.\n'))
     res = eng.sync(interactive=True, manual=True)
     if finish(res) != 0:
-        say(f"\nRisolvi il problema e rilancia:  {APP} setup")
+        say(_('\nFix the problem and run again:  {app} setup').format(app=APP))
         return 1
     say("")
-    if shutil.which("systemctl") and confirm("Attivo la sincronizzazione automatica in background?"):
+    if shutil.which("systemctl") and confirm(_('Turn on automatic background sync?')):
         cmd_enable(cfg, None)
-    say(f"\nFatto. Comandi utili:  {APP} status  ·  {APP} sync  ·  {APP} log  ·  {APP} doctor")
+    say(_('\nDone. Useful commands:  {app} status  ·  {app} sync  ·  {app} log  ·  {app} doctor').format(app=APP))
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        prog=APP, description="Sincronizzazione bidirezionale di iCloud Drive su Linux (motore: rclone bisync).",
-        epilog=f"Software libero con licenza MIT, fornito SENZA ALCUNA GARANZIA. Progetto indipendente, non affiliato ad Apple. {HOMEPAGE}")
+        prog=APP, description=_('Two-way iCloud Drive synchronization for Linux (engine: rclone bisync).'),
+        epilog=_('Free software under the MIT license, provided WITHOUT ANY WARRANTY. Independent project, not affiliated with Apple. {homepage}').format(homepage=HOMEPAGE))
     ap.add_argument("--version", action="version", version=f"{APP} {VERSION}")
-    sub = ap.add_subparsers(dest="cmd", metavar="comando")
+    sub = ap.add_subparsers(dest="cmd", metavar=_('command'))
 
     def add(name, fn, help_):
         p = sub.add_parser(name, help=help_, description=help_)
         p.set_defaults(fn=fn)
         return p
 
-    add("setup", cmd_setup, "configurazione guidata: rclone, login Apple, prima sync, servizio")
-    add("status", cmd_status, "mostra lo stato della sincronizzazione").add_argument("--json", action="store_true")
-    p = add("sync", cmd_sync, "sincronizza adesso")
-    p.add_argument("--dry-run", action="store_true", help="mostra cosa farebbe senza modificare nulla")
-    p.add_argument("--force", action="store_true", help="consenti anche un numero elevato di eliminazioni")
-    p = add("resync", cmd_resync, "riallinea i due lati da zero (non elimina nulla)")
-    p.add_argument("--prefer", choices=["newer", "local", "icloud"], default="newer", help="chi vince se un file differisce (default: il più recente)")
+    add("setup", cmd_setup, _('guided setup: rclone, Apple sign-in, first sync, service'))
+    add("status", cmd_status, _('show the sync state')).add_argument("--json", action="store_true")
+    p = add("sync", cmd_sync, _('sync now'))
+    p.add_argument("--dry-run", action="store_true", help=_('show what would be done without changing anything'))
+    p.add_argument("--force", action="store_true", help=_('also allow a large number of deletions'))
+    p = add("resync", cmd_resync, _('realign both sides from scratch (deletes nothing)'))
+    p.add_argument("--prefer", choices=["newer", "local", "icloud"], default="newer", help=_('who wins when a file differs (default: the newer one)'))
     p.add_argument("--dry-run", action="store_true")
-    p = add("login", cmd_login, "(ri)autentica l'Apple ID: serve circa ogni 30 giorni")
-    p.add_argument("--new-password", action="store_true", help="reinserisci Apple ID e password")
-    p.add_argument("--reset", action="store_true", help="azzera cookie e token salvati prima di riprovare")
-    p.add_argument("--gui", action="store_true", help="usa una finestra invece del terminale")
-    add("enable", cmd_enable, "avvia il servizio in background e l'icona nel vassoio, a ogni accesso")
-    add("disable", cmd_disable, "ferma servizio e icona")
-    add("restart", cmd_restart, "riavvia il servizio (dopo aver cambiato la configurazione)")
-    add("pause", cmd_pause, "sospende la sincronizzazione automatica finché non la riprendi")
-    add("resume", cmd_resume, "riprende la sincronizzazione automatica")
+    p = add("login", cmd_login, _('sign in to the Apple ID again: needed about every 30 days'))
+    p.add_argument("--new-password", action="store_true", help=_('enter Apple ID and password again'))
+    p.add_argument("--reset", action="store_true", help=_('clear the saved cookies and token before retrying'))
+    p.add_argument("--gui", action="store_true", help=_('use a window instead of the terminal'))
+    add("enable", cmd_enable, _('start the background service and the tray icon, at every login'))
+    add("disable", cmd_disable, _('stop the service and the tray icon'))
+    add("restart", cmd_restart, _('restart the service (after changing the configuration)'))
+    add("pause", cmd_pause, _('suspend automatic sync until you resume it'))
+    add("resume", cmd_resume, _('resume automatic sync'))
     sub.add_parser("_notify").set_defaults(fn=cmd_notify_helper)  # interno: notifica con pulsanti
     sub.choices["_notify"].add_argument("spec")
-    add("watch", cmd_watch, "esegue il demone in primo piano (usato dal servizio)")
-    add("tray", cmd_tray, "icona nel vassoio di sistema: stato, apri cartella, sincronizza ora")
-    p = add("log", cmd_log, "mostra le ultime righe del log")
+    add("watch", cmd_watch, _('run the daemon in the foreground (used by the service)'))
+    add("tray", cmd_tray, _('tray icon: state, open folder, sync now'))
+    p = add("log", cmd_log, _('show the last lines of the log'))
     p.add_argument("-n", "--lines", type=int, default=40)
-    p.add_argument("--error", action="store_true", help="log completo di rclone dell'ultima sync fallita")
-    p = add("skipped", cmd_skipped, "elenca gli elementi che iCloud non lascia scaricare")
-    p.add_argument("--retry", action="store_true", help="rimuovi le esclusioni e riprova")
-    add("doctor", cmd_doctor, "diagnostica completa")
-    add("install-rclone", cmd_install_rclone, "installa/aggiorna rclone in ~/.local/bin")
+    p.add_argument("--error", action="store_true", help=_('full rclone log of the last failed sync'))
+    p = add("skipped", cmd_skipped, _('list the items iCloud will not let rclone download'))
+    p.add_argument("--retry", action="store_true", help=_('remove the exclusions and try again'))
+    add("doctor", cmd_doctor, _('full diagnostic'))
+    add("install-rclone", cmd_install_rclone, _('install or update rclone in ~/.local/bin'))
 
     args = ap.parse_args()
     if not args.cmd:
@@ -2122,11 +2143,485 @@ def main() -> int:
     try:
         rc = args.fn(cfg, args)
     except KeyboardInterrupt:
-        say("\nInterrotto.")
+        say(_('\nInterrupted.'))
         return 130
+    except BrokenPipeError:  # es. `icloud-sync log | head`: chi leggeva ha chiuso, non è un errore
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
     if rc == 0 and args.cmd in ("sync", "resync") and not args.dry_run:
         poke_daemon()
     return rc
+
+
+# ---------------------------------------------------------------- traduzione italiana
+
+# Chiave: il testo inglese usato nel codice. Ogni testo passato a _() o N_() deve comparire qui
+# (lo verifica tests/test_unit.py).
+IT.update({
+    '# Configuration of {app}. After a change: {app} restart':
+        '# Configurazione di {app}. Dopo una modifica: {app} restart',
+    'Items that rclone cannot download from iCloud and that are therefore NOT synced:':
+        'Elementi che rclone non riesce a scaricare da iCloud e che quindi NON vengono sincronizzati:',
+    'Please wait…': 'Attendi…',
+    'Y/n': 'S/n',
+    'y/N': 's/N',
+    'yes': 'sì',
+    'no': 'no',
+    'never synced': 'mai sincronizzato',
+    'never run': 'mai eseguita',
+    '{v1} s ago': '{v1} s fa',
+    '{v1} h ago': '{v1} h fa',
+    '\nApple will now ask for the two-factor verification code (it arrives on your Apple devices).':
+        '\nOra Apple chiederà il codice di verifica a 2 fattori (arriva sui tuoi dispositivi Apple).',
+    '\nDone. Useful commands:  {app} status  ·  {app} sync  ·  {app} log  ·  {app} doctor':
+        '\nFatto. Comandi utili:  {app} status  ·  {app} sync  ·  {app} log  ·  {app} doctor',
+    '\nFirst sync: it merges both sides without deleting anything; when two files share a name the newer one wins.':
+        '\nPrima sincronizzazione: unisce i due lati senza eliminare nulla; a parità di nome vince il file più recente.',
+    '\nFix the problem and run again:  {app} setup':
+        '\nRisolvi il problema e rilancia:  {app} setup',
+    '\nInterrupted.':
+        '\nInterrotto.',
+    '\nInterrupted: waiting for rclone to save its state …':
+        '\nInterruzione: attendo che rclone salvi lo stato …',
+    '\nTo retry them (e.g. after an rclone update):  {app} skipped --retry':
+        '\nPer riprovarli (es. dopo un aggiornamento di rclone):  {app} skipped --retry',
+    '\n✓ Signed in: {v1} items in the root of iCloud Drive. Valid for about {trust_days} days.':
+        '\n✓ Login riuscito: {v1} elementi nella radice di iCloud Drive. Valido circa {trust_days} giorni.',
+    '\n✗ Sign-in completed but iCloud Drive does not answer: {v1}':
+        '\n✗ Login completato ma iCloud Drive non risponde: {v1}',
+    '\n✗ Sign-in failed. Try again with:  {app} login --reset   (clears the saved cookies and token)':
+        '\n✗ Login non riuscito. Riprova con:  {app} login --reset   (azzera cookie e token salvati)',
+    '  Last ok:    {v1}':
+        '  Ultima ok:  {v1}',
+    '  Service:    {v1}':
+        '  Servizio:   {v1}',
+    '  Sign-in:    ':
+        '  Login:      ',
+    '  Skipped:    {v1} items that cannot be downloaded from iCloud → {app} skipped':
+        '  Esclusi:    {v1} elementi non scaricabili da iCloud → {app} skipped',
+    '  State:      {line}':
+        '  Stato:      {line}',
+    ' and {v1} more':
+        ' e altri {v1}',
+    ' — PAUSED ({app} resume)':
+        ' — IN PAUSA ({app} resume)',
+    '"{v1}" is not an rclone remote: there is nothing to sign in to.':
+        '«{v1}» non è un remote rclone: niente login da fare.',
+    '(preview: nothing was changed)':
+        '(anteprima: non è stato modificato nulla)',
+    '=== {app}: guided setup ===':
+        '=== {app}: configurazione guidata ===',
+    'Activity log — iCloud Drive':
+        'Registro attività — iCloud Drive',
+    'Activity log…':
+        'Registro attività…',
+    'Also notify when new files arrive from iCloud':
+        'Notifica anche quando arrivano nuovi file da iCloud',
+    'Another sync is in progress: waiting for it to finish …':
+        "Un'altra sincronizzazione è in corso: attendo che finisca …",
+    'Apple ID password':
+        "Password dell'Apple ID",
+    'Apple ID password (the normal one, not an "app-specific password").':
+        "Password dell'Apple ID (quella normale, non una «password per app»).",
+    'Apple sign-in — iCloud Drive':
+        'Accesso Apple — iCloud Drive',
+    'Architecture {v1} is not handled: install rclone from https://rclone.org/downloads/':
+        'Architettura {v1} non gestita: installa rclone da https://rclone.org/downloads/',
+    'Automatic sync is stopped':
+        'Sincronizzazione automatica ferma',
+    'Cancel':
+        'Annulla',
+    'Cannot save the credentials: {e}.\nCreate the remote by hand with `rclone config` (name "{name}", type "iclouddrive") and run this again.':
+        'Non posso salvare le credenziali: {e}.\nCrea il remote a mano con `rclone config` (nome «{name}», tipo «iclouddrive») e rilancia.',
+    'Cannot start rclone.':
+        'Impossibile avviare rclone.',
+    'Check file converted: {old_check_file} → {check_file} (hidden)':
+        'File di controllo convertito: {old_check_file} → {check_file} (nascosto)',
+    'Check that .icloud-sync-check exists on both sides, then:  icloud-sync resync':
+        'Controlla che .icloud-sync-check esista su entrambi i lati, poi:  icloud-sync resync',
+    'Checking access to iCloud Drive…':
+        "Verifico l'accesso a iCloud Drive…",
+    'Checksum NOT valid for {name} (expected {expected}, got {actual}): installation cancelled.':
+        'Checksum NON valido per {name} (atteso {expected}, ottenuto {actual}): installazione annullata.',
+    'Close':
+        'Chiudi',
+    'Close tray icon':
+        'Chiudi icona',
+    'Confirm':
+        'Conferma',
+    'Contacting Apple…':
+        'Contatto Apple…',
+    'Continue':
+        'Continua',
+    'Desktop notifications for errors, conflicts and sign-in expiry':
+        'Notifiche desktop su errori, conflitti e scadenza login',
+    'Details:  icloud-sync log':
+        'Dettagli:  icloud-sync log',
+    'Download the official binary from rclone.org into ~/.local/bin (with checksum verification)?':
+        'Scarico il binario ufficiale da rclone.org in ~/.local/bin (con verifica del checksum)?',
+    'Downloading {name} from downloads.rclone.org …':
+        'Scarico {name} da downloads.rclone.org …',
+    'Enter the 6-digit code that arrived on your Apple devices.\nIf it does not arrive, type "sms" to get it by text message.':
+        'Inserisci il codice a 6 cifre arrivato sui tuoi dispositivi Apple.\nSe non arriva, scrivi «sms» per riceverlo via messaggio.',
+    'Enter your Apple ID and its normal password (not an "app-specific password"). The password stays on your PC, in the rclone configuration.\n\nWith Advanced Data Protection on, first enable "Access iCloud Data on the Web" on your iPhone.':
+        "Inserisci l'Apple ID e la sua password normale (non una «password per app»). La password resta sul tuo PC, nella configurazione di rclone.\n\nCon la Protezione avanzata dei dati attiva, abilita prima «Accedi ai dati iCloud sul web» su iPhone.",
+    'Enter your Apple ID and password.':
+        'Inserisci Apple ID e password.',
+    'Error in {config_file}: "{k}" must be of type {v1}':
+        'Errore in {config_file}: «{k}» deve essere di tipo {v1}',
+    'Error in {config_file}: {e}':
+        'Errore in {config_file}: {e}',
+    'Excluded from sync: {path} — {why}':
+        'Escluso dalla sincronizzazione: {path} — {why}',
+    'Extra flags passed to rclone bisync, e.g. ["--bwlimit", "2M"]':
+        'Flag aggiuntivi passati a rclone bisync, es. ["--bwlimit", "2M"]',
+    'File changed on both sides: newer | older | larger | smaller | path1 | path2 | none\n# (the loser is never deleted: it is renamed to *.conflictN)':
+        'File modificato su entrambi i lati: newer | older | larger | smaller | path1 | path2 | none\n# (il perdente non viene mai cancellato: viene rinominato in *.conflictN)',
+    'Files and folders to ignore (glob on the name; a trailing "/" means folder)':
+        'File/cartelle da ignorare (glob sul nome; "/" finale = cartella)',
+    'First sync (or configuration changed): aligning both sides without deleting anything':
+        'Prima sincronizzazione (o configurazione cambiata): allineo i due lati senza eliminare nulla',
+    'For the tray icon install PyQt6 (sudo apt install python3-pyqt6) and run this command again.':
+        "Per l'icona nel vassoio installa PyQt6 (sudo apt install python3-pyqt6) e ripeti il comando.",
+    'Free software (MIT license), provided without any warranty: keep a backup of your important files.\n':
+        'Software libero (licenza MIT), fornito senza alcuna garanzia: tieni un backup dei file importanti.\n',
+    'Free software under the MIT license, provided WITHOUT ANY WARRANTY. Independent project, not affiliated with Apple. {homepage}':
+        'Software libero con licenza MIT, fornito SENZA ALCUNA GARANZIA. Progetto indipendente, non affiliato ad Apple. {homepage}',
+    'From iCloud: {v1} new files ({names})':
+        'Da iCloud: {v1} nuovi file ({names})',
+    'Full safety check: how often, in seconds, to sync anyway (this also catches renames)':
+        'Controllo completo di sicurezza: ogni quanti secondi sincronizzare comunque (coglie anche le rinomine)',
+    'Host used to tell whether the network is up (empty string = do not check)':
+        "Host usato per capire se c'è rete (stringa vuota = non controllare)",
+    'If it persists:  icloud-sync login   (details: icloud-sync doctor)':
+        'Se persiste:  icloud-sync login   (dettagli: icloud-sync doctor)',
+    'If the deletions are intended:  icloud-sync sync --force':
+        'Se le eliminazioni sono volute:  icloud-sync sync --force',
+    'In sync, {v1}':
+        'Sincronizzato {v1}',
+    'Install it (e.g. sudo apt install rclone) and run again:  {app} setup':
+        'Installalo (es. sudo apt install rclone) e rilancia:  {app} setup',
+    'Invalid bisync state ({message}): rebuilding with --resync (no file is deleted)':
+        'Stato bisync non valido ({message}): ricostruisco con --resync (nessun file viene eliminato)',
+    'It can take a while if iCloud Drive holds many files.\n':
+        'Può richiedere tempo se iCloud Drive contiene molti file.\n',
+    'It is saved only in the local rclone configuration, obscured.':
+        'Viene salvata solo nella configurazione locale di rclone, offuscata.',
+    'Light check of iCloud (a single request): how often, in seconds, to ask whether anything changed.\n# If so, a sync starts right away. 0 = disabled':
+        'Controllo leggero di iCloud (una sola richiesta): ogni quanti secondi chiedere se è cambiato qualcosa.\n# Se sì, parte subito la sincronizzazione. 0 = disattivato',
+    'Local folder':
+        'Cartella locale',
+    'Local folder to keep in sync':
+        'Cartella locale da tenere sincronizzata',
+    'Longest wait (seconds) when local changes never stop':
+        'Attesa massima (secondi) se le modifiche locali non si fermano mai',
+    'Name of the rclone remote':
+        'Nome del remote rclone',
+    'New from iCloud Drive':
+        'Nuovo da iCloud Drive',
+    'No configuration found. Run first:  {app} setup':
+        'Nessuna configurazione trovata. Esegui prima:  {app} setup',
+    'No log yet.':
+        'Nessun log ancora.',
+    'No skipped items: everything in iCloud Drive is being synced.':
+        'Nessun elemento escluso: tutto ciò che è in iCloud Drive viene sincronizzato.',
+    'Note: {bin_dir} is not in PATH; add it or use the full path.':
+        'Nota: {bin_dir} non è nel PATH; aggiungilo o usa il percorso completo.',
+    'Nothing is deleted, to be safe. If this is right, to upload the files again:  icloud-sync resync':
+        'Per sicurezza non elimino nulla. Se è corretto, per ricaricare i file:  icloud-sync resync',
+    'Nothing to change.':
+        'Nessuna modifica da fare.',
+    'Offline: resuming as soon as the network is back':
+        'Offline: riprendo appena torna la rete',
+    'Open folder':
+        'Apri cartella',
+    'Open iCloud Drive folder':
+        'Apri cartella iCloud Drive',
+    'Parallel checkers (raising it speeds up the listing of large folders)':
+        "Controlli in parallelo (alzare velocizza l'elenco di cartelle grandi)",
+    'Parallel transfers':
+        'Trasferimenti in parallelo',
+    'Path of rclone (empty = look in PATH and in ~/.local/bin)':
+        'Percorso di rclone (vuoto = cerca nel PATH e in ~/.local/bin)',
+    'Pause':
+        'Metti in pausa',
+    'Paused':
+        'In pausa',
+    'Quiet seconds after a local change before syncing':
+        'Secondi di quiete dopo una modifica locale prima di sincronizzare',
+    'Realigning both sides: files present on one side only are copied to the other, nothing is deleted.':
+        "Riallineo i due lati: i file presenti da una sola parte vengono copiati dall'altra, nulla viene eliminato.",
+    'Refresh':
+        'Aggiorna',
+    'Renew Apple sign-in…':
+        'Rinnova accesso Apple…',
+    'Renew Apple sign-in… ({v1} days left)':
+        'Rinnova accesso Apple… (restano {v1} giorni)',
+    'Renew sign-in':
+        'Rinnova accesso',
+    'Renew the Apple sign-in now?\n\nApple will send a verification code to your devices: keep one at hand.':
+        "Rinnovare ora l'accesso ad Apple?\n\nApple invierà un codice di verifica ai tuoi dispositivi: tienine uno a portata di mano.",
+    'Repair the sync state automatically after a critical error (never deletes files)':
+        'Ripara da solo lo stato dopo un errore critico (non elimina mai file)',
+    'Require the file .icloud-sync-check on both sides (protects against empty or wrong listings)':
+        'Richiede il file .icloud-sync-check su entrambi i lati (protegge da elenchi vuoti/errati)',
+    'Resume sync':
+        'Riprendi la sincronizzazione',
+    'Resumed':
+        'Ripresa',
+    'Retry all':
+        'Riprova tutti',
+    'Run:  icloud-sync login':
+        'Esegui:  icloud-sync login',
+    'Run:  icloud-sync resync':
+        'Esegui:  icloud-sync resync',
+    'Service and tray icon disabled. Configuration and files stay where they are.':
+        'Servizio e icona disattivati. Configurazione e file restano dove sono.',
+    'Show':
+        'Mostra',
+    'Sign in':
+        'Accedi',
+    'Sign-in completed, but iCloud Drive does not answer.':
+        'Accesso completato, ma iCloud Drive non risponde.',
+    'Sign-in failed.':
+        'Accesso non riuscito.',
+    'Signed in. It lasts about {trust_days} days: you will be reminded a few days before it expires.':
+        'Accesso riuscito. Vale circa {trust_days} giorni: ti avviso qualche giorno prima della scadenza.',
+    'Skipped items ({v1})…':
+        'Elementi esclusi ({v1})…',
+    'Skipped items — iCloud Drive':
+        'Elementi esclusi — iCloud Drive',
+    'Start it with:  {app} enable':
+        'Avvia con:  {app} enable',
+    'Started: {local} ⇄ {remote} — {v1} folders watched, ':
+        'Avviato: {local} ⇄ {remote} — {v1} cartelle sorvegliate, ',
+    'Stop the sync if more than this % of the files on one side would be deleted':
+        'Blocca la sync se andrebbe eliminato più di questo % di file su un lato',
+    'Stopped':
+        'Arrestato',
+    'Sync in progress…':
+        'Sincronizzazione in corso…',
+    'Sync now':
+        'Sincronizza ora',
+    'Sync paused. To resume:  {app} resume':
+        'Sincronizzazione in pausa. Per riprendere:  {app} resume',
+    'Sync restored.':
+        'Sincronizzazione ripristinata.',
+    'Sync resumed.':
+        'Sincronizzazione ripresa.',
+    'Temporary problem: retrying shortly':
+        'Problema temporaneo: riprovo tra poco',
+    'The Apple sign-in expires in about {v1} days.\nRenew it with:  {app} login':
+        'Il login Apple scade tra circa {v1} giorni.\nRinnovalo con:  {app} login',
+    'The tray icon is already running.':
+        "L'icona nel vassoio è già attiva.",
+    'The tray icon needs PyQt6:  sudo apt install python3-pyqt6':
+        "Per l'icona nel vassoio serve PyQt6:  sudo apt install python3-pyqt6",
+    'Try again':
+        'Riprova',
+    'Turn on automatic background sync?':
+        'Attivo la sincronizzazione automatica in background?',
+    'Two-way iCloud Drive synchronization for Linux (engine: rclone bisync).':
+        'Sincronizzazione bidirezionale di iCloud Drive su Linux (motore: rclone bisync).',
+    'Waiting for the first sync':
+        'In attesa della prima sincronizzazione',
+    'Warning: inotify watch limit reached; some folders are covered only by the periodic check (raise fs.inotify.max_user_watches)':
+        'Attenzione: limite di watch inotify raggiunto; alcune cartelle sono coperte solo dal controllo periodico (aumenta fs.inotify.max_user_watches)',
+    'With Advanced Data Protection on, first enable "Access iCloud Data on the Web" on your iPhone.\n':
+        'Con la Protezione avanzata dei dati attiva: abilita prima «Accedi ai dati iCloud sul web» su iPhone.\n',
+    'active':
+        'attivo',
+    'also allow a large number of deletions':
+        'consenti anche un numero elevato di eliminazioni',
+    'another sync is in progress':
+        "un'altra sincronizzazione è in corso",
+    'check disabled':
+        'controllo disattivato',
+    'check file {check_file}':
+        'file di controllo {check_file}',
+    'clear the saved cookies and token before retrying':
+        'azzera cookie e token salvati prima di riprovare',
+    'command':
+        'comando',
+    'copied':
+        'copiati',
+    'deleted':
+        'eliminati',
+    'enter Apple ID and password again':
+        'reinserisci Apple ID e password',
+    'failed':
+        'fallito',
+    'full check every {v1}s':
+        'controllo completo ogni {v1}s',
+    'full diagnostic':
+        'diagnostica completa',
+    'full rclone log of the last failed sync':
+        "log completo di rclone dell'ultima sync fallita",
+    'guided setup: rclone, Apple sign-in, first sync, service':
+        'configurazione guidata: rclone, login Apple, prima sync, servizio',
+    'iCloud Drive answers':
+        'iCloud Drive risponde',
+    'iCloud Drive: conflict':
+        'iCloud Drive: conflitto',
+    'iCloud Drive: items skipped':
+        'iCloud Drive: elementi esclusi',
+    'iCloud Drive: sign-in expiring':
+        'iCloud Drive: login in scadenza',
+    'in conflict':
+        'conflitti',
+    'inconsistent size on iCloud (typical of iWork documents)':
+        'dimensione incoerente su iCloud (tipico dei documenti iWork)',
+    'inotify not available ({e}): using the periodic check only':
+        'inotify non disponibile ({e}): uso solo il controllo periodico',
+    'inotify_init1 failed':
+        'inotify_init1 fallita',
+    'install or update rclone in ~/.local/bin':
+        'installa/aggiorna rclone in ~/.local/bin',
+    'interrupted on request':
+        'interrotta su richiesta',
+    'last sync':
+        'ultima sincronizzazione',
+    'light check of iCloud every {probe_every}s, ':
+        'controllo leggero di iCloud ogni {probe_every}s, ',
+    'list the items iCloud will not let rclone download':
+        'elenca gli elementi che iCloud non lascia scaricare',
+    'local folder':
+        'cartella locale',
+    'local folder not found: {local} (disk not mounted?)':
+        'cartella locale non trovata: {local} (disco non montato?)',
+    'local: {v1}, iCloud: {v2} → {app} resync':
+        'locale: {v1}, iCloud: {v2} → {app} resync',
+    'missing → {app} install-rclone':
+        'mancante → {app} install-rclone',
+    'network':
+        'rete',
+    'never':
+        'mai',
+    'no changes':
+        'nessuna modifica',
+    'no connection':
+        'nessuna connessione',
+    'not installed':
+        'non installato',
+    'present on both sides':
+        'presente su entrambi i lati',
+    'probably expired → {app} login':
+        'probabilmente scaduto → {app} login',
+    'rclone (>= 1.69) is not installed: it is the engine that talks to iCloud.':
+        'rclone (>= 1.69) non è installato: è il motore che parla con iCloud.',
+    'rclone exited with code {rc}':
+        'rclone è uscito con codice {rc}',
+    'rclone not found. Install it with:  {app} install-rclone   (or: sudo apt install rclone)':
+        'rclone non trovato. Installa con:  {app} install-rclone   (oppure: sudo apt install rclone)',
+    'rclone obscure failed: {v1}':
+        'rclone obscure fallito: {v1}',
+    'rclone remote (and optional subfolder), e.g. "icloud:" or "icloud:Documents"':
+        'Remote rclone (ed eventuale sottocartella), es. "icloud:" o "icloud:Documenti"',
+    'rclone updated to {ver}: retrying the {v1} items skipped earlier':
+        'rclone aggiornato a {ver}: riprovo i {v1} elementi esclusi in precedenza',
+    'rclone {v1} is too old: iCloud Drive needs >= 1.69.\nUpdate it with:  {app} install-rclone':
+        'rclone {v1} è troppo vecchio: serve >= 1.69 per iCloud Drive.\nAggiorna con:  {app} install-rclone',
+    'realign both sides from scratch (deletes nothing)':
+        'riallinea i due lati da zero (non elimina nulla)',
+    'remote "{name}" configured':
+        'remote «{name}» configurato',
+    'remove the exclusions and try again':
+        'rimuovi le esclusioni e riprova',
+    'renamed':
+        'rinominati',
+    'restart the service (after changing the configuration)':
+        'riavvia il servizio (dopo aver cambiato la configurazione)',
+    'resume automatic sync':
+        'riprende la sincronizzazione automatica',
+    'run the daemon in the foreground (used by the service)':
+        'esegue il demone in primo piano (usato dal servizio)',
+    'service':
+        'servizio',
+    'shared folder: rclone cannot download it':
+        'cartella condivisa: rclone non riesce a scaricarla',
+    'show the last lines of the log':
+        'mostra le ultime righe del log',
+    'show the sync state':
+        'mostra lo stato della sincronizzazione',
+    'show what would be done without changing anything':
+        'mostra cosa farebbe senza modificare nulla',
+    'sign in to the Apple ID again: needed about every 30 days':
+        "(ri)autentica l'Apple ID: serve circa ogni 30 giorni",
+    'start the background service and the tray icon, at every login':
+        "avvia il servizio in background e l'icona nel vassoio, a ogni accesso",
+    'stop the service and the tray icon':
+        'ferma servizio e icona',
+    'stopped':
+        'fermo',
+    'suspend automatic sync until you resume it':
+        'sospende la sincronizzazione automatica finché non la riprendi',
+    'sync now':
+        'sincronizza adesso',
+    'systemd not available':
+        'systemd non disponibile',
+    'the rclone configuration is encrypted':
+        'la configurazione di rclone è cifrata',
+    'timeout while contacting the remote':
+        'timeout nel contattare il remote',
+    'tray icon: state, open folder, sync now':
+        'icona nel vassoio di sistema: stato, apri cartella, sincronizza ora',
+    'use a window instead of the terminal':
+        'usa una finestra invece del terminale',
+    'valid for about {v1} more days':
+        'valido ancora ~{v1} giorni',
+    'warning: unknown option "{k}" in {config_file}':
+        'attenzione: opzione sconosciuta «{k}» in {config_file}',
+    'who wins when a file differs (default: the newer one)':
+        'chi vince se un file differisce (default: il più recente)',
+    '{check_file} was missing in the local folder: restored from iCloud':
+        '{check_file} mancava nella cartella locale: ripristinato da iCloud',
+    '{ndirs} folders, limit {limit}':
+        '{ndirs} cartelle, limite {limit}',
+    '{new_skips} items that cannot be downloaded from iCloud were excluded from sync.\nList:  {app} skipped':
+        '{new_skips} elementi non scaricabili da iCloud sono stati esclusi dalla sincronizzazione.\nElenco:  {app} skipped',
+    '{v1} days ago':
+        '{v1} giorni fa',
+    '{v1} exclusions removed: they will be retried at the next sync.':
+        '{v1} esclusioni rimosse: verranno riprovate alla prossima sincronizzazione.',
+    '{v1} files changed on both sides. Both versions were kept (look for ".conflict").':
+        '{v1} file modificati su entrambi i lati. Entrambe le versioni sono state conservate (cerca «.conflict»).',
+    '{v1} min ago':
+        '{v1} min fa',
+    '… interrupted':
+        '… interrotta',
+    '… offline, retrying as soon as the network is back':
+        '… offline, riprovo appena torna la rete',
+    '… sync in progress':
+        '… sincronizzazione in corso',
+    '…but only when more files than this would be deleted (deleting 1 file out of 3 is normal)':
+        '…ma solo se i file da eliminare sono più di questo numero (eliminare 1 file su 3 è normale)',
+    '✓ Configuration: {config_file}\n':
+        '✓ Configurazione: {config_file}\n',
+    '✓ Installed {target}':
+        '✓ Installato {target}',
+    '✓ Service active: it starts by itself at every login.':
+        '✓ Servizio attivo: parte da solo a ogni accesso.',
+    '✓ Tray icon active.':
+        '✓ Icona nel vassoio di sistema attiva.',
+    '✓ in sync':
+        '✓ sincronizzato',
+    '✓ rclone {ver} installed in {target} (checksum verified)':
+        '✓ rclone {ver} installato in {target} (checksum verificato)',
+    '✗ Apple sign-in expired or refused':
+        '✗ login Apple scaduto o rifiutato',
+    '✗ blocked: check file missing':
+        '✗ bloccato: file di controllo mancante',
+    '✗ blocked: one of the two sides looks empty':
+        '✗ bloccato: uno dei due lati risulta vuoto',
+    '✗ blocked: too many deletions at once':
+        '✗ bloccato: troppe eliminazioni in una volta',
+    '✗ error':
+        '✗ errore',
+    '✗ iCloud unreachable':
+        '✗ iCloud non raggiungibile',
+    '✗ sync state must be rebuilt':
+        '✗ stato da ricostruire',
+})
 
 
 if __name__ == "__main__":
