@@ -169,41 +169,62 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(self.run_sync("ok"), 2)
 
 
+FAKE_GDBUS = """#!/bin/sh
+# Stands in for gdbus + the desktop's notification server.
+here=$(dirname "$0")
+case "$1" in
+  monitor)
+    echo "Monitoring signals on object /org/freedesktop/Notifications owned by :1.42"
+    while [ ! -f "$here/sent" ]; do sleep 0.05; done
+    echo "/org/freedesktop/Notifications: org.freedesktop.Notifications.ActionInvoked (uint32 6, '0')"
+    echo "/org/freedesktop/Notifications: org.freedesktop.Notifications.__REPLY__"
+    sleep 30 ;;
+  call)
+    printf '%s\\n' "$@" > "$here/args"
+    echo "(uint32 7,)"
+    touch "$here/sent" ;;
+esac
+"""
+
+
 class NotificationButtonTests(unittest.TestCase):
     """The helper process shows the notification, waits for a click and runs the matching action."""
 
-    def run_helper(self, fake_notify_send):
+    def run_helper(self, reply):
+        import argparse
+        import json
         bindir = Path(tempfile.mkdtemp(prefix="ics-bin-"))
-        (bindir / "notify-send").write_text(fake_notify_send)
-        (bindir / "notify-send").chmod(0o755)
-        spec = {"cmd": [str(bindir / "notify-send"), "-a", "iCloud Drive"], "text": ["title", "body"],
+        (bindir / "gdbus").write_text(FAKE_GDBUS.replace("__REPLY__", reply))
+        (bindir / "gdbus").chmod(0o755)
+        spec = {"title": "It's here", "body": "line one\nline two", "urgent": False,
                 "actions": [["Renew", "login", ""], ["Show", "show", "/tmp/x"]]}
         done = []
         real, ics.run_action = ics.run_action, lambda verb, arg: done.append((verb, arg))
+        path, os.environ["PATH"] = os.environ["PATH"], f"{bindir}:{os.environ['PATH']}"
         try:
-            import argparse
-            import json
+            started = time.time()
             self.assertEqual(ics.cmd_notify_helper(None, argparse.Namespace(spec=json.dumps(spec))), 0)
+            self.assertLess(time.time() - started, 10, "the helper must stop waiting once the notification is answered")
         finally:
-            ics.run_action = real
-        return done, bindir
+            ics.run_action, os.environ["PATH"] = real, path
+        return done, (bindir / "args").read_text()
 
     def test_clicked_button_runs_its_action(self):
-        done, _ = self.run_helper('#!/bin/sh\necho "$@" > "$(dirname "$0")/args"\necho 1\n')
+        done, _ = self.run_helper("ActionInvoked (uint32 7, '1')")
         self.assertEqual(done, [("show", "/tmp/x")])
 
-    def test_buttons_are_passed_to_notify_send(self):
-        _, bindir = self.run_helper('#!/bin/sh\necho "$@" > "$(dirname "$0")/args"\n')
-        self.assertIn("--action=0=Renew --action=1=Show title body", (bindir / "args").read_text())
+    def test_buttons_and_text_reach_the_notification_server(self):
+        _, sent = self.run_helper("NotificationClosed (uint32 7, uint32 2)")
+        self.assertIn("['0', 'Renew', '1', 'Show']", sent)
+        self.assertIn("'It\\'s here'", sent)
+        self.assertIn("'line one\\nline two'", sent)
 
     def test_dismissed_notification_runs_nothing(self):
-        done, _ = self.run_helper("#!/bin/sh\nexit 0\n")
+        done, _ = self.run_helper("NotificationClosed (uint32 7, uint32 2)")
         self.assertEqual(done, [])
 
-    def test_old_notify_send_still_shows_the_message(self):
-        done, bindir = self.run_helper('#!/bin/sh\ncase "$*" in *--action*) exit 1;; esac\necho "$@" > "$(dirname "$0")/args"\n')
-        self.assertEqual(done, [])
-        self.assertIn("title body", (bindir / "args").read_text())
+    def test_gvariant_quoting(self):
+        self.assertEqual(ics.gvariant("a'b\\c\nd"), "'a\\'b\\\\c\\nd'")
 
 
 class FolderIconTests(unittest.TestCase):

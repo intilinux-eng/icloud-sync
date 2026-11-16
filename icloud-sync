@@ -237,18 +237,23 @@ def notify(cfg: dict, title: str, body: str, urgent: bool = False,
     """Notifica desktop. actions = [(etichetta del pulsante, verbo, argomento)], vedi run_action()."""
     if not cfg.get("notifications") or not shutil.which("notify-send"):
         return
-    cmd = ["notify-send", "-a", "iCloud Drive", "-i", "folder-cloud", "-u", "critical" if urgent else "normal"]
     try:
-        if actions:
+        if actions and shutil.which("gdbus"):
             # Un pulsante richiede che qualcuno aspetti la risposta: lo fa un processo a parte, mai il demone.
-            spec = json.dumps({"cmd": cmd, "text": [title, body], "actions": actions})
+            spec = json.dumps({"title": title, "body": body, "urgent": urgent, "actions": actions})
             subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_notify", spec],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              start_new_session=True)
         else:
-            subprocess.run(cmd + [title, body], timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            plain_notification(title, body, urgent)
     except (OSError, subprocess.SubprocessError):
         pass
+
+
+def plain_notification(title: str, body: str, urgent: bool) -> None:
+    subprocess.run(["notify-send", "-a", "iCloud Drive", "-i", "folder-cloud",
+                    "-u", "critical" if urgent else "normal", title, body],
+                   timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def run_action(verb: str, arg: str) -> None:
@@ -269,23 +274,68 @@ def run_action(verb: str, arg: str) -> None:
         subprocess.Popen(["xdg-open", str(target)], **quiet)
 
 
+def gvariant(text: str) -> str:
+    """Stringa nel formato testuale di GVariant, per gli argomenti di gdbus."""
+    return "'" + text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n") + "'"
+
+
 def cmd_notify_helper(_cfg, args) -> int:
-    """Mostra una notifica con pulsanti, aspetta la scelta ed esegue l'azione (comando interno)."""
+    """Mostra una notifica con pulsanti, aspetta la scelta ed esegue l'azione (comando interno).
+
+    Parla direttamente con il server delle notifiche (org.freedesktop.Notifications) tramite gdbus:
+    `notify-send --action` su alcuni sistemi rifiuta i pulsanti anche quando il server li supporta.
+    """
     spec = json.loads(args.spec)
-    buttons = [f"--action={i}={label}" for i, (label, _verb, _arg) in enumerate(spec["actions"])]
+    bus = ["--session", "--dest", "org.freedesktop.Notifications", "--object-path", "/org/freedesktop/Notifications"]
+    buttons = ", ".join(f"{gvariant(str(i))}, {gvariant(label)}" for i, (label, _verb, _arg) in enumerate(spec["actions"]))
+    hints = "{'urgency': <byte %d>, 'desktop-entry': <%s>}" % (2 if spec["urgent"] else 1, gvariant(APP))
     try:
-        p = subprocess.run(spec["cmd"] + buttons + spec["text"], capture_output=True, text=True, timeout=NOTIFY_WAIT)
-    except subprocess.TimeoutExpired:
-        return 0
+        # Prima ci si mette in ascolto dei segnali, poi si invia: così la risposta non può andare persa.
+        monitor = subprocess.Popen(["gdbus", "monitor", *bus], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError:
-        return 1
-    if p.returncode != 0:  # notify-send troppo vecchio per i pulsanti: almeno mostra il messaggio
-        subprocess.run(spec["cmd"] + spec["text"], capture_output=True, timeout=5)
+        plain_notification(spec["title"], spec["body"], spec["urgent"])
         return 0
-    choice = p.stdout.strip()
-    if choice.isdigit() and int(choice) < len(spec["actions"]):
-        _label, verb, arg = spec["actions"][int(choice)]
-        run_action(verb, arg)
+    deadline = time.monotonic() + NOTIFY_WAIT
+    pending = b""
+
+    def next_line() -> str | None:
+        """Prossima riga del monitor, None a tempo scaduto o a monitor chiuso. Si legge il descrittore
+        grezzo: con un flusso bufferizzato select() non vedrebbe le righe già lette in anticipo."""
+        nonlocal pending
+        while b"\n" not in pending:
+            wait = deadline - time.monotonic()
+            if wait <= 0 or not select.select([monitor.stdout], [], [], wait)[0]:
+                return None
+            chunk = os.read(monitor.stdout.fileno(), 4096)
+            if not chunk:
+                return None
+            pending += chunk
+        line, pending = pending.split(b"\n", 1)
+        return line.decode(errors="replace")
+
+    try:
+        next_line()  # riga «Monitoring signals…»: l'ascolto è attivo
+        sent = subprocess.run(
+            ["gdbus", "call", *bus, "--method", "org.freedesktop.Notifications.Notify", gvariant("iCloud Drive"),
+             "uint32 0", gvariant("folder-cloud"), gvariant(spec["title"]), gvariant(spec["body"]),
+             f"[{buttons}]", hints, "int32 -1"], capture_output=True, text=True, timeout=15)
+        found = re.search(r"uint32 (\d+)", sent.stdout)
+        if sent.returncode != 0 or not found:
+            plain_notification(spec["title"], spec["body"], spec["urgent"])
+            return 0
+        ident = found.group(1)
+        while (line := next_line()) is not None:
+            chosen = re.search(rf"ActionInvoked \(uint32 {ident}, '(\d+)'\)", line)
+            if chosen and int(chosen.group(1)) < len(spec["actions"]):
+                _label, verb, arg = spec["actions"][int(chosen.group(1))]
+                run_action(verb, arg)
+                break
+            if re.search(rf"NotificationClosed \(uint32 {ident},", line):
+                break
+    except (OSError, subprocess.SubprocessError):
+        pass
+    finally:
+        monitor.kill()
     return 0
 
 
