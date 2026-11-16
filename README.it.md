@@ -10,6 +10,16 @@ Una cartella locale (`~/iCloudDrive`) resta allineata con iCloud Drive: quello c
 > Progetto indipendente, non affiliato ad Apple. iCloud è un marchio di Apple Inc.
 > Software fornito **senza alcuna garanzia** (licenza MIT): tieni sempre un backup dei dati importanti.
 
+## Usato tutti i giorni
+
+icloud-sync non è una demo. Il suo autore lo usa ogni giorno sul proprio iCloud Drive (in uso quotidiano da novembre 2026), e ciò che lì si rompe o dà fastidio decide che cosa viene sistemato dopo. Diverse funzioni esistono solo perché l'uso reale ha fatto emergere il problema:
+
+- cartelle condivise e documenti iWork facevano fallire ogni sincronizzazione: ora vengono riconosciuti ed esclusi da soli;
+- iCloud risponde cinque volte più lentamente subito dopo ogni modifica: da qui la corsia veloce per i file nuovi;
+- eliminare un file su tre faceva scattare il blocco delle eliminazioni di massa: ora poche eliminazioni passano sempre.
+
+Se da te si comporta male, [apri una segnalazione](https://github.com/intilinux-eng/icloud-sync/issues): è così che migliora.
+
 ## Perché esiste
 
 Apple non offre un client Linux e iCloud Drive non espone un filesystem né SSH: strumenti come `rsync` o `unison` non possono parlarci direttamente. L'unico motore maturo è [rclone](https://rclone.org/iclouddrive/), che dalla v1.69 ha un backend iCloud Drive nativo, e [`rclone bisync`](https://rclone.org/bisync/) per la sincronizzazione a due vie.
@@ -102,6 +112,17 @@ Configurazione in `~/.config/icloud-sync/config.toml` (commentata): cartella, in
 - Nella radice compare un file `RCLONE_TEST`: è il file di controllo, non eliminarlo.
 - I messaggi del programma sono per ora solo in italiano.
 
+## Piano di sviluppo
+
+Le priorità seguono l'uso quotidiano: è un piano, non una promessa.
+
+- **0.3, comodità d'uso.** Finestra grafica per il login Apple; più azioni nel vassoio (pausa, elementi esclusi, log); messaggi in inglese, con l'italiano come traduzione.
+- **0.4, lato iCloud più veloce.** Un rclone sempre acceso, che vale 6–7 secondi sulla corsia veloce; eliminazioni e modifiche nella corsia veloce; rinomine rilevate prima.
+- **0.5, distribuzione.** Repository APT firmato, per aggiornare con `apt upgrade`; pacchetti RPM e AUR; icona nel vassoio anche con PySide6 (LGPL).
+- **0.6, funzioni.** Cestino locale per i file eliminati o sovrascritti da iCloud; sincronizzazione selettiva; più account.
+
+Il piano completo, con le motivazioni e le misure dietro ogni voce, è in [ROADMAP.md](ROADMAP.md).
+
 ## Sviluppo
 
 ```bash
@@ -112,7 +133,7 @@ make deb     # costruisce dist/icloud-sync_<versione>_all.deb
 
 I test di integrazione usano il programma vero e un rclone vero tra due cartelle locali. La pipeline [CI](.github/workflows/ci.yml) li esegue su Python 3.11–3.14, costruisce il pacchetto, lo passa a lintian e lo installa. Per pubblicare una versione: aggiorna `VERSION` nel programma e [CHANGELOG.md](CHANGELOG.md), poi crea il tag `vX.Y.Z`; la pipeline [Release](.github/workflows/release.yml) allega il `.deb` alla release.
 
-Sviluppi previsti: [ROADMAP.md](ROADMAP.md).
+Cosa è cambiato in ogni versione: [CHANGELOG.md](CHANGELOG.md).
 
 ## Licenza e software di terzi
 

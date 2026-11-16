@@ -30,6 +30,16 @@ Apple ships no iCloud client for Linux. `icloud-sync` gives you a folder, `~/iCl
 
 It does not reimplement Apple's private API. It drives [rclone](https://rclone.org/iclouddrive/), which maintains the hard part (Apple sign-in, two-factor, Advanced Data Protection), and adds everything a daily-use sync client needs on top.
 
+## Used every day
+
+icloud-sync is not a demo. Its author runs it every day on his own iCloud Drive (in daily use since November 2026), and what breaks or gets in the way there decides what is fixed next. Several features exist only because real use exposed the problem:
+
+- shared folders and iWork documents made every sync fail, so they are now detected and skipped automatically;
+- iCloud turned out to answer five times slower right after any change, which led to the fast lane for new files;
+- deleting one file out of three tripped the mass-deletion guard, so small deletions are now always allowed.
+
+If it misbehaves for you, [open an issue](https://github.com/intilinux-eng/icloud-sync/issues): that is how it gets better.
+
 ## Quick start
 
 On Debian, Ubuntu and derivatives, download the `.deb` from the [latest release](https://github.com/intilinux-eng/icloud-sync/releases/latest), then:
@@ -143,6 +153,17 @@ icloud-sync is not the only way to reach iCloud Drive from Linux, and another pr
 
 Choose icloud-sync if you want a full local copy that syncs both ways, a `.deb` you can install, a tray icon on a standard desktop, and an engine (rclone) that a large community keeps working when Apple changes things. Choose a FUSE mount if you would rather not keep every file on disk.
 
+## Roadmap
+
+Priorities follow daily use, so this is a plan, not a promise.
+
+- **0.3, ease of use.** A graphical window for the Apple sign-in; more tray actions (pause, skipped items, log); English messages, with Italian as a translation.
+- **0.4, a faster iCloud side.** A persistent rclone process, worth 6–7 seconds on the fast lane; deletions and edits through the fast lane too; quicker detection of renames.
+- **0.5, distribution.** A signed APT repository so updates arrive with `apt upgrade`; RPM and AUR packages; the tray icon on PySide6 (LGPL) as an alternative to PyQt6.
+- **0.6, features.** A local trash for files deleted or overwritten from iCloud; selective sync; more than one account.
+
+The full plan, with the reasoning and the measurements behind each item, is in [ROADMAP.md](ROADMAP.md) (in Italian).
+
 ## Contributing
 
 ```bash
@@ -153,7 +174,7 @@ make deb     # builds dist/icloud-sync_<version>_all.deb
 
 The integration tests run the real program against a real rclone between two local folders. [CI](.github/workflows/ci.yml) runs them on Python 3.11 to 3.14, builds the package, checks it with lintian and installs it. Pushing a `vX.Y.Z` tag publishes a [release](.github/workflows/release.yml) with the `.deb` attached.
 
-What is planned next: [ROADMAP.md](ROADMAP.md). What changed: [CHANGELOG.md](CHANGELOG.md).
+What changed in each version: [CHANGELOG.md](CHANGELOG.md).
 
 ## License and third-party software
 

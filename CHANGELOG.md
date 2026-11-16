@@ -4,7 +4,7 @@ Le versioni seguono [Semantic Versioning](https://semver.org/lang/it/). Finché 
 
 ## Non ancora rilasciato
 
-- README in inglese come pagina di presentazione; la versione italiana è in `README.it.md`.
+- README in inglese come pagina di presentazione, con nota sull'uso quotidiano e sintesi del piano di sviluppo; la versione italiana è in `README.it.md`.
 - Licenze: intestazioni SPDX nei sorgenti, elenco del software di terzi, avviso di assenza di garanzia nel README, nella guida in linea, nella procedura `setup` e nella pagina man.
 
 ## 0.2.0
