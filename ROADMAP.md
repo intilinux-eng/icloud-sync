@@ -22,7 +22,7 @@ Rimandato:
 
 | Voce | Perché | Note |
 |---|---|---|
-| Emblemi di stato sui singoli file in Dolphin | Vedere a colpo d'occhio cosa è sincronizzato | Serve un plugin C++ (`KOverlayIconPlugin`), in un pacchetto a parte compilato per architettura |
+| Pacchetto e pipeline per il plugin di Dolphin | Il plugin degli emblemi esiste (cartella `dolphin/`) ma va compilato a mano | È codice compilato: serve un pacchetto per architettura e un job di build dedicato |
 | Icona della cartella ed emblemi in Nautilus (GNOME) | Oggi solo Dolphin | Non serve nulla di compilato (`gio set` o un'estensione Python), ma va provato su un desktop GNOME |
 | Commenti e documentazione interna del codice in inglese | Oggi sono in italiano: frena chi vuole contribuire | Solo i messaggi all'utente sono stati tradotti |
 

@@ -74,6 +74,18 @@ class OneShotTests(SyncTestCase):
         self.assertTrue((self.pc / CHECK).exists() and (self.cloud / CHECK).exists())
         self.assertEqual(self.ics("status").returncode, 0)
 
+    def test_state_for_the_file_manager_plugin_matches_the_disk(self):
+        (self.pc / "Docs").mkdir()
+        (self.pc / "Docs" / "a.txt").write_text("hello")
+        self.sync()
+        lines = (self.tmp / "state" / "icloud-sync" / "overlay-state.tsv").read_text().splitlines()
+        self.assertEqual(lines[0], "icloud-sync-overlay\t1")
+        self.assertEqual(lines[1], f"root\t{self.pc}")
+        self.assertIn("exclude\t.DS_Store", lines)
+        self.assertIn("d\tDocs", lines)
+        stat = (self.pc / "Docs" / "a.txt").stat()
+        self.assertIn(f"f\t{stat.st_size}\t{stat.st_mtime_ns // 1_000_000}\tDocs/a.txt", lines)
+
     def test_messages_follow_the_system_language(self):
         self.env["LANGUAGE"] = "it_IT:en"
         self.assertIn("mai sincronizzato", self.ics("status").stdout)

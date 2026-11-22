@@ -79,7 +79,7 @@ python3 icloud-sync setup
 - Tray icon with the state at a glance: *Open folder*, *Sync now*, *Pause*, the activity log and the items that were skipped.
 - A window for the Apple sign-in, so renewing it every 30 days does not need a terminal.
 - Notifications with buttons: *Show* on a file that just arrived, *Renew sign-in* when Apple asks for it.
-- A cloud icon on the synced folder in Dolphin.
+- A cloud icon on the synced folder in Dolphin, and optional per-file emblems (synced, waiting, conflict) through a small plugin: see [dolphin/](dolphin/README.md).
 - A reminder four days before the Apple sign-in expires (Apple requires a new one about every 30 days).
 - systemd user service, man page, menu entry, Debian package.
 

@@ -6,6 +6,7 @@ Le versioni seguono [Semantic Versioning](https://semver.org/lang/it/). Finché 
 
 ### Aggiunto
 
+- Emblemi di stato sui file in Dolphin (spunta verde, frecce, conflitto): plugin C++ nella cartella `dolphin/`, da compilare e installare a parte. Collaudato con un test automatico, non ancora visto in Dolphin.
 - Messaggi in inglese, con l'italiano come traduzione: la lingua segue quella del sistema (`LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG`). Un test garantisce che nessun messaggio resti senza traduzione.
 - Finestra grafica per l'accesso Apple (`icloud-sync login --gui`, o dal vassoio): Apple ID, password e codice a due fattori senza terminale. Provata contro un rclone simulato; non ancora contro un vero rinnovo con Apple.
 - Vassoio: *Metti in pausa / Riprendi*, *Elementi esclusi* con «Riprova tutti», *Registro attività*, *Rinnova accesso Apple* con i giorni rimasti.

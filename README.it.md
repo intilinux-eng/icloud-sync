@@ -80,6 +80,8 @@ Note sul login:
 - **Elementi esclusi** e **Registro attività**: ciò che non si è potuto sincronizzare e le ultime operazioni.
 - **Rinnova accesso Apple**: apre una finestra per password e codice a due fattori, senza terminale, e mostra i giorni rimasti.
 
+In Dolphin la cartella ha un'icona a nuvola; un piccolo plugin facoltativo aggiunge gli emblemi di stato su ogni file (sincronizzato, in attesa, conflitto): vedi [dolphin/](dolphin/README.md).
+
 Le notifiche hanno pulsanti: *Mostra* su un file appena arrivato, *Rinnova accesso* quando Apple lo richiede.
 
 ## Uso da terminale

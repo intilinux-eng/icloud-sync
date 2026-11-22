@@ -14,6 +14,7 @@ Nessuna dipendenza oltre a Python >= 3.11 e rclone >= 1.69.
 from __future__ import annotations
 
 import argparse
+import calendar
 import contextlib
 import ctypes
 import errno
@@ -87,6 +88,7 @@ LOCK_FILE = STATE_DIR / "lock"
 PID_FILE = STATE_DIR / "daemon.pid"
 ACTIVITY_FILE = STATE_DIR / "activity"   # contiene il PID di chi sta sincronizzando in questo momento
 TRAY_LOCK = STATE_DIR / "tray.pid"
+OVERLAY_FILE = STATE_DIR / "overlay-state.tsv"   # stato per file, letto dal plugin di Dolphin (cartella dolphin/)
 PAUSE_FILE = STATE_DIR / "paused"        # finché esiste il demone non sincronizza (sopravvive al riavvio)
 NOTIFY_WAIT = 3600                       # secondi in cui i pulsanti di una notifica restano attivi
 DIRECTORY_FILE = "[Desktop Entry]\nIcon=folder-cloud\n"   # icona della cartella in Dolphin
@@ -182,6 +184,7 @@ LOST_STATE_RE = re.compile(r"must run --resync|cannot find prior path1 or path2 
 DELETES_RE = re.compile(r"too many deletes \(>\d+%, (\d+) of \d+\)", re.I)
 ACCESS_RE = re.compile(r"access (test|check) failed|failed to find any files named|check file check failed", re.I)
 LST_RE = re.compile(r'^(\S)\s+(-?\d+)\s+\S+\s+\S+\s+\S+\s+"(.*)"$')
+LST_TIME_RE = re.compile(r'^(\S)\s+(-?\d+)\s+\S+\s+\S+\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)\.(\d{9})([+-]\d{4})\s+"(.*)"$')
 QUICK = ["--no-mimetype", "--retries", "1", "--low-level-retries", "1", "--contimeout", "5s", "--timeout", "15s"]
 FAST_PULL_REQUESTS = 12   # massimo di cartelle esplorate dalla corsia veloce
 FAST_PULL_FILES = 50      # oltre questa soglia è una modifica in blocco: se ne occupa il giro completo
@@ -787,6 +790,36 @@ class Engine:
         blob = json.dumps([str(self.local), self.remote, filters, empty_dirs, self.cfg["check_access"]])
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
+    def write_overlay_state(self) -> None:
+        """Esporta ciò che bisync ha appena sincronizzato (percorso, dimensione, data in millisecondi) per
+        il plugin di Dolphin, che mette la spunta ai file identici a questo elenco e segnala gli altri."""
+        work = Path(os.environ.get("XDG_CACHE_HOME") or HOME / ".cache") / "rclone/bisync"
+        cands = [f for f in work.glob("*.path1.lst") if str(self.local).replace("/", "_") + ".." in f.name]
+        if len(cands) != 1:
+            return
+        out = ["icloud-sync-overlay\t1", f"root\t{self.local}"]
+        out += [f"exclude\t{p.rstrip('/')}" for p in self.cfg["exclude"]]
+        for line in cands[0].read_text(errors="replace").splitlines():
+            m = LST_TIME_RE.match(line)
+            if not m:
+                continue
+            kind, size, stamp, nanos, zone, quoted = m.groups()
+            try:
+                name = json.loads(f'"{quoted}"')
+            except ValueError:
+                name = quoted
+            if "\t" in name or "\n" in name:
+                continue
+            if kind == "d":
+                out.append(f"d\t{name}")
+            else:
+                seconds = calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%S"))  # data scritta in UTC
+                seconds -= (int(zone[1:3]) * 3600 + int(zone[3:5]) * 60) * (1 if zone[0] == "+" else -1)
+                out.append(f"f\t{size}\t{int(seconds) * 1000 + int(nanos) // 1_000_000}\t{name}")
+        tmp = OVERLAY_FILE.with_suffix(".tmp")
+        tmp.write_text("\n".join(out) + "\n")
+        tmp.replace(OVERLAY_FILE)
+
     def restore_local_check_file(self) -> bool:
         """Rimette in locale il file di controllo se è stato eliminato per sbaglio (ha l'aria di un file inutile).
 
@@ -1025,6 +1058,8 @@ class Engine:
             st.update(status=res.status, message=res.message, last_attempt=t0, last_duration=round(time.time() - t0, 1))
             if res.ok:
                 st.update(last_success=time.time(), last_counts=res.counts)
+                with contextlib.suppress(OSError):
+                    self.write_overlay_state()
             self.announce(prev, res, st)
             save_state(st)
 
