@@ -7,6 +7,7 @@ A small plugin that shows the sync state of every file in Dolphin and in KDE fil
 | green check (`vcs-normal`) | identical to what the last sync recorded |
 | arrows (`vcs-update-required`) | new or edited since then: it will go up at the next sync |
 | red mark (`vcs-conflicting`) | a conflict copy kept by the sync (`name.conflict1.ext`) |
+| "unavailable" mark (`emblem-unavailable`) | an item iCloud does not let rclone download (shared folders, iWork documents): it stays on iCloud only, see `icloud-sync skipped` |
 
 Hidden files and the names excluded in `config.toml` get no emblem, because they are never synced.
 

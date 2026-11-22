@@ -790,7 +790,7 @@ class Engine:
         blob = json.dumps([str(self.local), self.remote, filters, empty_dirs, self.cfg["check_access"]])
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
-    def write_overlay_state(self) -> None:
+    def write_overlay_state(self, skipped: dict[str, str]) -> None:
         """Esporta ciò che bisync ha appena sincronizzato (percorso, dimensione, data in millisecondi) per
         il plugin di Dolphin, che mette la spunta ai file identici a questo elenco e segnala gli altri."""
         work = Path(os.environ.get("XDG_CACHE_HOME") or HOME / ".cache") / "rclone/bisync"
@@ -799,6 +799,7 @@ class Engine:
             return
         out = ["icloud-sync-overlay\t1", f"root\t{self.local}"]
         out += [f"exclude\t{p.rstrip('/')}" for p in self.cfg["exclude"]]
+        out += [f"skip\t{p.rstrip('/')}" for p in sorted(skipped)]  # mai sincronizzabili: emblema a parte
         for line in cands[0].read_text(errors="replace").splitlines():
             m = LST_TIME_RE.match(line)
             if not m:
@@ -1059,7 +1060,7 @@ class Engine:
             if res.ok:
                 st.update(last_success=time.time(), last_counts=res.counts)
                 with contextlib.suppress(OSError):
-                    self.write_overlay_state()
+                    self.write_overlay_state(st.get("skipped", {}))
             self.announce(prev, res, st)
             save_state(st)
 

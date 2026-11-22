@@ -44,6 +44,7 @@ private:
     QHash<QString, Known> m_files;
     QSet<QString> m_dirs;
     QStringList m_exclude;
+    QStringList m_skipped; // items iCloud will not let rclone download: they never sync
     QDateTime m_loaded;
     QSet<QUrl> m_shown; // items Dolphin asked about, to refresh them after the next sync
     QFileSystemWatcher m_watcher;
@@ -77,6 +78,7 @@ bool ICloudSyncOverlay::load()
     m_files.clear();
     m_dirs.clear();
     m_exclude.clear();
+    m_skipped.clear();
     while (!file.atEnd()) {
         QByteArray line = file.readLine();
         if (line.endsWith('\n')) {
@@ -89,6 +91,8 @@ bool ICloudSyncOverlay::load()
         const QByteArray kind = parts.at(0);
         if (kind == "root") {
             m_root = QString::fromUtf8(parts.at(1)) + QLatin1Char('/');
+        } else if (kind == "skip") {
+            m_skipped.append(QString::fromUtf8(parts.at(1)));
         } else if (kind == "exclude") {
             m_exclude.append(QString::fromUtf8(parts.at(1)));
         } else if (kind == "d") {
@@ -142,6 +146,11 @@ QStringList ICloudSyncOverlay::overlaysFor(const QString &path) const
     }
     if (components.isEmpty()) {
         return {};
+    }
+    for (const QString &skipped : m_skipped) {
+        if (relative == skipped || relative.startsWith(skipped + QLatin1Char('/'))) {
+            return {QStringLiteral("emblem-unavailable")};
+        }
     }
     if (components.constLast().contains(QLatin1String(".conflict"))) {
         return {QStringLiteral("vcs-conflicting")};

@@ -269,6 +269,9 @@ exec "{RCLONE}" "$@"
         (self.cloud / "ok.txt").write_text("fine")
         self.sync()
         listed = self.ics("skipped").stdout
+        overlay = (self.tmp / "state" / "icloud-sync" / "overlay-state.tsv").read_text().splitlines()
+        self.assertIn("skip\tShared", overlay)
+        self.assertIn("skip\tKeynote/Deck.key", overlay)
         self.assertIn("Shared/", listed)
         self.assertIn("Keynote/Deck.key", listed)
         self.assertIn("2 items", self.ics("status").stdout)

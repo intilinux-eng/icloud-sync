@@ -54,11 +54,12 @@ int main(int argc, char **argv)
     writeFile(root + QStringLiteral("/Docs/inside.txt"), "x");
     writeFile(root + QStringLiteral("/NewFolder/a.txt"), "x");
     writeFile(root + QStringLiteral("/report.conflict1.txt"), "x");
+    writeFile(root + QStringLiteral("/Shared/doc.pdf"), "x");
     writeFile(root + QStringLiteral("/.hidden"), "x");
     writeFile(root + QStringLiteral("/draft.tmp"), "x");
     writeFile(tmp.path() + QStringLiteral("/elsewhere.txt"), "x");
 
-    const QString header = QStringLiteral("icloud-sync-overlay\t1\nroot\t%1\nexclude\t*.tmp\nd\tDocs\n").arg(root);
+    const QString header = QStringLiteral("icloud-sync-overlay\t1\nroot\t%1\nexclude\t*.tmp\nskip\tShared\nd\tDocs\n").arg(root);
     const QString firstState = header + record(root, QStringLiteral("synced.txt")) + QStringLiteral("f\t3\t1\tchanged.txt\n")
         + record(root, QStringLiteral("Docs/inside.txt"));
     writeFile(stateFile, firstState.toUtf8());
@@ -79,6 +80,8 @@ int main(int argc, char **argv)
     expect(plugin, root + QStringLiteral("/Docs/inside.txt"), synced, "file in a subfolder");
     expect(plugin, root + QStringLiteral("/NewFolder"), pending, "new folder");
     expect(plugin, root + QStringLiteral("/report.conflict1.txt"), {QStringLiteral("vcs-conflicting")}, "conflict copy");
+    expect(plugin, root + QStringLiteral("/Shared"), {QStringLiteral("emblem-unavailable")}, "folder iCloud will not serve");
+    expect(plugin, root + QStringLiteral("/Shared/doc.pdf"), {QStringLiteral("emblem-unavailable")}, "file inside it");
     expect(plugin, root + QStringLiteral("/.hidden"), {}, "hidden file");
     expect(plugin, root + QStringLiteral("/draft.tmp"), {}, "excluded file");
     expect(plugin, tmp.path() + QStringLiteral("/elsewhere.txt"), {}, "file outside the synced folder");
