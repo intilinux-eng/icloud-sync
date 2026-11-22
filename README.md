@@ -121,7 +121,10 @@ flowchart TB
 ## Limitations
 
 - rclone's iCloud backend is marked **experimental** and uses Apple's unofficial web API. If Apple changes it, sync pauses until rclone catches up (`icloud-sync install-rclone` updates the binary). Your local files stay as they are in the meantime.
-- **Shared folders and iWork documents** (Keynote, Pages, Numbers) cannot be downloaded through rclone today. They are excluded automatically, stay on iCloud only, and are listed by `icloud-sync skipped`.
+- **Shared folders and iWork documents** (Keynote, Pages, Numbers) cannot be downloaded through rclone today. They are excluded automatically, stay on iCloud only, and are listed by `icloud-sync skipped`; in Dolphin they carry an "unavailable" emblem.
+  - *Shared folders* (shared with you by another Apple ID): rclone sees the folder and the file names but the download fails. Reported upstream in [rclone/rclone#9477](https://github.com/rclone/rclone/issues/9477); a proposed fix is open in [rclone/rclone#9487](https://github.com/rclone/rclone/pull/9487). Workaround: in the Files app on the iPhone, copy the files into a folder of your own iCloud Drive; that copy syncs normally, but it no longer follows the owner's changes.
+  - *iWork documents*: iCloud reports a size that differs from the file it serves, so rclone rejects the download as corrupted: [rclone/rclone#9798](https://github.com/rclone/rclone/issues/9798).
+  - When a fixed rclone is released, `icloud-sync install-rclone` installs it and the excluded items are retried automatically.
 - iCloud provides no checksums: files are compared by size and modification time.
 - It is not an on-demand filesystem: every synced file takes disk space.
 - A hidden file named `.icloud-sync-check` lives in the Drive root. It is the check file; leave it there. If you delete it on the PC by mistake it is put back.

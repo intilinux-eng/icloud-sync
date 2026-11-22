@@ -59,7 +59,7 @@ Rimandato:
 
 ## Dipendenze a monte e rischi
 
-- **Cartelle condivise e documenti iWork** non sono scaricabili con rclone: vanno seguiti (e segnalati) i relativi problemi nel progetto rclone. Il programma li riprova da solo a ogni aggiornamento di rclone.
+- **Cartelle condivise e documenti iWork** non sono scaricabili con rclone: problemi aperti [rclone/rclone#9477](https://github.com/rclone/rclone/issues/9477) (cartelle condivise, con la correzione proposta [rclone/rclone#9487](https://github.com/rclone/rclone/pull/9487), ferma da agosto 2026) e [rclone/rclone#9798](https://github.com/rclone/rclone/issues/9798) (iWork). Possiamo contribuire provando la correzione proposta sul nostro caso e riportando l'esito. Il programma li riprova da solo a ogni aggiornamento di rclone.
 - **API non ufficiale**: Apple può cambiarla senza preavviso; finché rclone non si adegua la sincronizzazione si ferma (senza perdere dati).
 - **Login ogni 30 giorni**: è un limite di Apple, non aggirabile.
 - **Prove contro un account reale**: i test automatici usano due cartelle locali; il comportamento specifico di iCloud (etag, lentezza dopo le modifiche) oggi è verificato solo a mano. Serve un account di prova dedicato per automatizzarlo.

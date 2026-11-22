@@ -6,7 +6,7 @@ Le versioni seguono [Semantic Versioning](https://semver.org/lang/it/). Finché 
 
 ### Aggiunto
 
-- Emblemi di stato sui file in Dolphin (spunta verde, frecce, conflitto, non sincronizzabile): plugin C++ nella cartella `dolphin/`, da compilare e installare a parte. Collaudato con un test automatico, non ancora visto in Dolphin.
+- Emblemi di stato sui file in Dolphin (spunta verde, frecce, conflitto, non sincronizzabile): plugin C++ nella cartella `dolphin/`, da compilare e installare a parte. Collaudato con un test automatico e verificato in Dolphin.
 - Messaggi in inglese, con l'italiano come traduzione: la lingua segue quella del sistema (`LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG`). Un test garantisce che nessun messaggio resti senza traduzione.
 - Finestra grafica per l'accesso Apple (`icloud-sync login --gui`, o dal vassoio): Apple ID, password e codice a due fattori senza terminale. Provata contro un rclone simulato; non ancora contro un vero rinnovo con Apple.
 - Vassoio: *Metti in pausa / Riprendi*, *Elementi esclusi* con «Riprova tutti», *Registro attività*, *Rinnova accesso Apple* con i giorni rimasti.
@@ -17,9 +17,10 @@ Le versioni seguono [Semantic Versioning](https://semver.org/lang/it/). Finché 
 
 ### Cambiato
 
-- Se il file di controllo `RCLONE_TEST` viene eliminato per sbaglio dalla cartella locale, viene ripristinato da iCloud invece di bloccare la sincronizzazione (solo se la cartella contiene ancora almeno metà dei file noti).
+- Se il file di controllo viene eliminato per sbaglio dalla cartella locale, viene ripristinato da iCloud invece di bloccare la sincronizzazione (solo se la cartella contiene ancora almeno metà dei file noti).
 - Un errore passeggero (per esempio una cartella eliminata mentre la sincronizzazione la stava leggendo) non genera più una notifica: viene riprovato in silenzio e segnalato solo se si ripete.
 - README in inglese come pagina di presentazione, con nota sull'uso quotidiano e sintesi del piano di sviluppo; la versione italiana è in `README.it.md`.
+- README: per cartelle condivise e documenti iWork, i riferimenti ai problemi aperti nel progetto rclone e una soluzione temporanea.
 - Licenze: intestazioni SPDX nei sorgenti, elenco del software di terzi, avviso di assenza di garanzia nel README, nella guida in linea, nella procedura `setup` e nella pagina man.
 
 ## 0.2.0
